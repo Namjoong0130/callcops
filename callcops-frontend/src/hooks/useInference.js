@@ -15,8 +15,8 @@ import * as ort from 'onnxruntime-web';
 // Configure ONNX Runtime Web
 ort.env.wasm.wasmPaths = 'https://cdn.jsdelivr.net/npm/onnxruntime-web/dist/';
 
-const DECODER_MODEL_PATH = '/models/decoder_int8.onnx';  // INT8 for speed
-const ENCODER_MODEL_PATH = '/models/encoder_int8.onnx';  // INT8 for speed
+const DECODER_MODEL_PATH = '/models/decoder.onnx';
+const ENCODER_MODEL_PATH = '/models/encoder.onnx';
 
 // Frame-Wise Constants (match Python model)
 const FRAME_SAMPLES = 320;      // 40ms @ 8kHz
