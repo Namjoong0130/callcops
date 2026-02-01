@@ -1,0 +1,4 @@
+# ONNX models placeholder
+# Copy your exported ONNX models here:
+# - encoder_int8.onnx
+# - decoder_int8.onnx
