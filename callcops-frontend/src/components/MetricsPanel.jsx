@@ -4,11 +4,11 @@
  * Displays detection metrics: confidence, status, and stats.
  */
 
-export function MetricsPanel({ 
-  bitProbs, 
+export function MetricsPanel({
+  bitProbs,
   status = 'idle',
   inferenceTime = 0,
-  error = null 
+  error = null
 }) {
   /**
    * Calculate confidence score
@@ -16,51 +16,51 @@ export function MetricsPanel({
    */
   const calculateConfidence = () => {
     if (!bitProbs || bitProbs.length !== 128) return 0;
-    
+
     let sum = 0;
     for (let i = 0; i < 128; i++) {
       sum += Math.max(bitProbs[i], 1 - bitProbs[i]);
     }
     return (sum / 128) * 100;
   };
-  
+
   /**
    * Calculate detection score
    * Higher when bits are clearly 0 or 1, lower when uncertain
    */
   const calculateDetection = () => {
     if (!bitProbs || bitProbs.length !== 128) return 0;
-    
+
     let sum = 0;
     for (let i = 0; i < 128; i++) {
       sum += Math.abs(bitProbs[i] - 0.5) * 2;
     }
     return (sum / 128) * 100;
   };
-  
+
   /**
    * Count bits that are confidently detected
    */
   const countConfidentBits = () => {
     if (!bitProbs) return { zeros: 0, ones: 0, uncertain: 128 };
-    
+
     let zeros = 0;
     let ones = 0;
     let uncertain = 0;
-    
+
     for (let i = 0; i < 128; i++) {
       if (bitProbs[i] > 0.7) ones++;
       else if (bitProbs[i] < 0.3) zeros++;
       else uncertain++;
     }
-    
+
     return { zeros, ones, uncertain };
   };
-  
+
   const confidence = calculateConfidence();
   const detection = calculateDetection();
   const bitCounts = countConfidentBits();
-  
+
   const getStatusColor = () => {
     switch (status) {
       case 'recording': return 'text-red-400';
@@ -68,7 +68,7 @@ export function MetricsPanel({
       default: return 'text-gray-400';
     }
   };
-  
+
   const getStatusIcon = () => {
     switch (status) {
       case 'recording':
@@ -91,11 +91,11 @@ export function MetricsPanel({
         );
     }
   };
-  
+
   return (
-    <div className="glass rounded-xl p-4 space-y-4">
+    <div className="glass rounded-xl p-4 space-y-4 h-full">
       <h3 className="text-sm font-semibold text-gray-300">Detection Metrics</h3>
-      
+
       {/* Status */}
       <div className="flex items-center justify-between">
         <span className="text-xs text-gray-500">Status</span>
@@ -104,7 +104,7 @@ export function MetricsPanel({
           <span className="text-sm font-medium capitalize">{status}</span>
         </div>
       </div>
-      
+
       {/* Confidence */}
       <div className="space-y-1">
         <div className="flex items-center justify-between">
@@ -114,13 +114,13 @@ export function MetricsPanel({
           </span>
         </div>
         <div className="w-full bg-gray-700 rounded-full h-2">
-          <div 
+          <div
             className="bg-gradient-to-r from-primary to-purple-400 h-2 rounded-full transition-all duration-300"
             style={{ width: `${confidence}%` }}
           />
         </div>
       </div>
-      
+
       {/* Detection */}
       <div className="space-y-1">
         <div className="flex items-center justify-between">
@@ -130,13 +130,13 @@ export function MetricsPanel({
           </span>
         </div>
         <div className="w-full bg-gray-700 rounded-full h-2">
-          <div 
+          <div
             className="bg-gradient-to-r from-green-500 to-emerald-400 h-2 rounded-full transition-all duration-300"
             style={{ width: `${detection}%` }}
           />
         </div>
       </div>
-      
+
       {/* Bit Breakdown */}
       <div className="grid grid-cols-3 gap-2 pt-2 border-t border-gray-700">
         <div className="text-center">
@@ -152,7 +152,7 @@ export function MetricsPanel({
           <div className="text-xs text-gray-500">Ones</div>
         </div>
       </div>
-      
+
       {/* Inference Time */}
       {inferenceTime > 0 && (
         <div className="flex items-center justify-between pt-2 border-t border-gray-700">
@@ -162,7 +162,7 @@ export function MetricsPanel({
           </span>
         </div>
       )}
-      
+
       {/* Error */}
       {error && (
         <div className="p-2 bg-red-900/30 border border-red-500/30 rounded-lg">

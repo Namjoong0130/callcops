@@ -28,16 +28,16 @@ function App() {
   const [currentFrameIndex, setCurrentFrameIndex] = useState(-1); // NEW: Current frame
   const [isPlaying, setIsPlaying] = useState(false);
   const [originalMessage, setOriginalMessage] = useState(null);  // Store embedded message for comparison
-  
+
   const audioCapture = useAudioCapture();
   const inference = useInference();
-  
+
   // Handle real-time audio chunks from microphone
   const handleAudioChunk = useCallback(async (chunk) => {
     if (!inference.isReady) {
       return;
     }
-    
+
     try {
       const result = await inference.runDecoder(chunk);
       setCurrentBitProbs(result.bits128);
@@ -47,14 +47,14 @@ function App() {
       console.error('Inference error:', err);
     }
   }, [inference.isReady, inference.runDecoder]);
-  
+
   // Start microphone recording
   const handleStartRecording = async () => {
     try {
       if (!inference.isReady) {
         await inference.loadDecoder();
       }
-      
+
       setDetectMode('recording');
       await audioCapture.startRecording(handleAudioChunk);
     } catch (err) {
@@ -62,38 +62,38 @@ function App() {
       console.error('Failed to start recording:', err);
     }
   };
-  
+
   // Stop recording
   const handleStopRecording = () => {
     audioCapture.stopRecording();
     setDetectMode('idle');
   };
-  
+
   // Handle file upload for detect mode
   const handleFileSelect = async (file) => {
     try {
       setDetectMode('processing');
-      
+
       if (!inference.isReady) {
         await inference.loadDecoder();
       }
-      
+
       const audioData = await audioCapture.loadFromFile(file);
-      
+
       if (audioData && inference.isReady) {
         const result = await inference.runDecoder(audioData);
         setCurrentBitProbs(result.bits128);
         setCurrentFrameProbs(result.frameProbs);
         setFrameInfo({ numFrames: result.numFrames, cycleCoverage: result.cycleCoverage });
       }
-      
+
       setDetectMode('idle');
     } catch (err) {
       setDetectMode('idle');
       console.error('Failed to process file:', err);
     }
   };
-  
+
   // Handle playback time updates for real-time detection sync
   const handleTimeUpdate = useCallback((time) => {
     if (!audioCapture.audioData) return;
@@ -103,7 +103,7 @@ function App() {
     setCurrentBitIndex(bitIndex);
     setCurrentFrameIndex(frameIndex);
   }, [audioCapture.audioData, inference]);
-  
+
   // Handle play state changes
   const handlePlayStateChange = useCallback((playing) => {
     setIsPlaying(playing);
@@ -113,21 +113,21 @@ function App() {
       setCurrentFrameIndex(-1);
     }
   }, []);
-  
+
   // Random position detection - proves watermark works from any position
   const [randomPosition, setRandomPosition] = useState(null);
   const [multiChunkResults, setMultiChunkResults] = useState(null);
-  
+
   const handleRandomPositionDetect = useCallback(async () => {
     if (!audioCapture.audioData || audioCapture.audioData.length < 8000) return;
     if (!inference.isReady) return;
-    
+
     try {
       setDetectMode('processing');
-      
+
       const audioLength = audioCapture.audioData.length;
       const durationSec = audioLength / inference.SAMPLE_RATE;
-      
+
       if (durationSec < 1) {
         // For short audio, just run normal detection
         const result = await inference.runDecoder(audioCapture.audioData);
@@ -139,7 +139,7 @@ function App() {
         // Pick a random start position
         const maxStart = Math.max(0, durationSec - 1);
         const randomStart = Math.random() * maxStart;
-        
+
         const result = await inference.runDecoderAtPosition(audioCapture.audioData, randomStart, 1.0);
         setCurrentBitProbs(result.bits128);
         setCurrentFrameProbs(result.frameProbs);
@@ -149,44 +149,44 @@ function App() {
           endTime: (randomStart + 1).toFixed(2),
         });
       }
-      
+
       setDetectMode('idle');
     } catch (err) {
       setDetectMode('idle');
       console.error('Random position detection failed:', err);
     }
   }, [audioCapture.audioData, inference]);
-  
+
   // Detect full audio using frame-wise approach (shows cyclic nature)
   const handleDetectAllChunks = useCallback(async () => {
     if (!audioCapture.audioData || audioCapture.audioData.length < inference.FRAME_SAMPLES) return;
     if (!inference.isReady) return;
-    
+
     try {
       setDetectMode('processing');
       setMultiChunkResults(null);
-      
+
       // Run full audio detection (frame-wise)
       const result = await inference.runDecoder(audioCapture.audioData);
-      
+
       setCurrentBitProbs(result.bits128);
       setCurrentFrameProbs(result.frameProbs);
       setFrameInfo({ numFrames: result.numFrames, cycleCoverage: result.cycleCoverage });
-      
+
       // Calculate sync pattern match
       const syncPattern = [1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0];
       let syncMatch = 0;
       for (let j = 0; j < 16; j++) {
         if ((result.bits128[j] > 0.5 ? 1 : 0) === syncPattern[j]) syncMatch++;
       }
-      
+
       setMultiChunkResults([{
         numFrames: result.numFrames,
         cycleCoverage: result.cycleCoverage.toFixed(2),
         syncScore: (syncMatch / 16 * 100).toFixed(0),
         avgConfidence: inference.calculateConfidence(result.bits128).toFixed(0),
       }]);
-      
+
       setRandomPosition(null);
       setDetectMode('idle');
     } catch (err) {
@@ -194,7 +194,7 @@ function App() {
       console.error('Full analysis failed:', err);
     }
   }, [audioCapture.audioData, inference]);
-  
+
   // Handle embed operation
   const handleEmbed = async (audioData, message, onProgress) => {
     try {
@@ -202,10 +202,10 @@ function App() {
         await inference.loadEncoder();
         setEncoderReady(true);
       }
-      
+
       // Save original message for comparison
       setOriginalMessage(message);
-      
+
       const watermarked = await inference.runEncoder(audioData, message, onProgress);
       return watermarked;
     } catch (err) {
@@ -213,28 +213,28 @@ function App() {
       throw err;
     }
   };
-  
+
   // Handle verify (switch to detect mode and run decoder)
   const handleVerify = async (audioData) => {
     setAppMode('detect');
-    
+
     // Small delay to allow UI update
     setTimeout(async () => {
       try {
         setDetectMode('processing');
-        
+
         if (!inference.isReady) {
           await inference.loadDecoder();
         }
-        
+
         // Set audio data in capture hook for waveform display
         audioCapture.setAudioData(audioData);
-        
+
         const result = await inference.runDecoder(audioData);
         setCurrentBitProbs(result.bits128);
         setCurrentFrameProbs(result.frameProbs);
         setFrameInfo({ numFrames: result.numFrames, cycleCoverage: result.cycleCoverage });
-        
+
         setDetectMode('idle');
       } catch (err) {
         setDetectMode('idle');
@@ -242,12 +242,12 @@ function App() {
       }
     }, 100);
   };
-  
+
   // Load decoder on initial render
   useEffect(() => {
     inference.loadDecoder().catch(console.error);
   }, []);
-  
+
   return (
     <div className="min-h-screen bg-surface p-4 md:p-8">
       <div className="max-w-6xl mx-auto space-y-6">
@@ -263,20 +263,20 @@ function App() {
               </div>
               <div>
                 <h1 className="text-2xl font-bold bg-gradient-to-r from-primary to-purple-400 bg-clip-text text-transparent">
-                  CallCops Preview
+                  CallCops
                 </h1>
                 <p className="text-sm text-gray-400">Audio Watermarking Demo</p>
               </div>
             </div>
-            
+
             {/* Mode Toggle */}
             <div className="flex items-center gap-3">
               <div className="flex bg-surface/50 rounded-xl p-1">
                 <button
                   onClick={() => setAppMode('embed')}
                   className={`px-4 py-2 rounded-lg text-sm font-medium transition-all duration-200
-                    ${appMode === 'embed' 
-                      ? 'bg-gradient-to-r from-primary to-purple-500 text-white' 
+                    ${appMode === 'embed'
+                      ? 'bg-gradient-to-r from-primary to-purple-500 text-white'
                       : 'text-gray-400 hover:text-gray-200'
                     }`}
                 >
@@ -290,8 +290,8 @@ function App() {
                 <button
                   onClick={() => setAppMode('detect')}
                   className={`px-4 py-2 rounded-lg text-sm font-medium transition-all duration-200
-                    ${appMode === 'detect' 
-                      ? 'bg-gradient-to-r from-primary to-purple-500 text-white' 
+                    ${appMode === 'detect'
+                      ? 'bg-gradient-to-r from-primary to-purple-500 text-white'
                       : 'text-gray-400 hover:text-gray-200'
                     }`}
                 >
@@ -303,26 +303,26 @@ function App() {
                   </span>
                 </button>
               </div>
-              
+
               {/* Model Status */}
               <div className={`
                 px-3 py-1.5 rounded-lg text-xs font-medium
-                ${inference.isReady ? 'bg-green-500/20 text-green-400' : 
+                ${inference.isReady ? 'bg-green-500/20 text-green-400' :
                   inference.isLoading ? 'bg-yellow-500/20 text-yellow-400' :
-                  inference.error ? 'bg-red-500/20 text-red-400' :
-                  'bg-gray-500/20 text-gray-400'
+                    inference.error ? 'bg-red-500/20 text-red-400' :
+                      'bg-gray-500/20 text-gray-400'
                 }
               `}>
-                {inference.isReady ? '● Model Ready' : 
+                {inference.isReady ? '● Model Ready' :
                   inference.isLoading ? '◐ Loading...' :
-                  inference.error ? '✕ Error' :
-                  '○ Not Loaded'
+                    inference.error ? '✕ Error' :
+                      '○ Not Loaded'
                 }
               </div>
             </div>
           </div>
         </header>
-        
+
         {/* Mode-specific content */}
         {appMode === 'embed' ? (
           /* Embed Mode */
@@ -362,7 +362,7 @@ function App() {
                   </li>
                 </ol>
               </div>
-              
+
               {/* Stats */}
               <div className="glass rounded-xl p-4">
                 <h3 className="text-sm font-semibold text-gray-300 mb-3">Encoder Stats</h3>
@@ -382,8 +382,8 @@ function App() {
                   <div className="bg-surface/50 rounded-lg p-3">
                     <p className="text-xs text-gray-500">Last Inference</p>
                     <p className="text-sm font-medium text-gray-200">
-                      {inference.lastInferenceTime > 0 
-                        ? `${inference.lastInferenceTime.toFixed(0)} ms` 
+                      {inference.lastInferenceTime > 0
+                        ? `${inference.lastInferenceTime.toFixed(0)} ms`
                         : '—'}
                     </p>
                   </div>
@@ -402,8 +402,8 @@ function App() {
                 className={`
                   px-6 py-3 rounded-xl font-medium flex items-center gap-2
                   transition-all duration-200
-                  ${detectMode === 'recording' 
-                    ? 'bg-red-500 hover:bg-red-600 text-white glow' 
+                  ${detectMode === 'recording'
+                    ? 'bg-red-500 hover:bg-red-600 text-white glow'
                     : 'bg-primary hover:bg-primary/80 text-white'
                   }
                   ${detectMode === 'processing' ? 'opacity-50 cursor-not-allowed' : ''}
@@ -427,7 +427,7 @@ function App() {
                 )}
               </button>
             </div>
-            
+
             {/* Progressive Detection - Animated Real-time Effect */}
             {audioCapture.audioData && (
               <ProgressiveDetection
@@ -443,11 +443,11 @@ function App() {
                 }}
               />
             )}
-            
+
             {/* Waveform Section */}
             <section className="glass rounded-2xl p-6">
               <h2 className="text-lg font-semibold text-gray-200 mb-4">Waveform Analysis</h2>
-              <WaveformView 
+              <WaveformView
                 audioData={audioCapture.audioData}
                 bitProbs={currentBitProbs}
                 frameProbs={currentFrameProbs}
@@ -455,38 +455,40 @@ function App() {
                 onPlayStateChange={handlePlayStateChange}
               />
             </section>
-            
+
             {/* Bottom Section */}
             <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
               {/* Bit Matrix */}
               <div className="lg:col-span-1">
-              <BitMatrixView 
-                bitProbs={currentBitProbs} 
-                currentBitIndex={isPlaying ? currentBitIndex : -1}
-                isProgressive={true}
-                isPlaying={isPlaying}
-              />
+                <BitMatrixView
+                  bitProbs={currentBitProbs}
+                  currentBitIndex={isPlaying ? currentBitIndex : -1}
+                  isProgressive={true}
+                  isPlaying={isPlaying}
+                />
               </div>
-              
+
               {/* Metrics */}
               <div className="lg:col-span-1">
-                <MetricsPanel 
+                <MetricsPanel
                   bitProbs={currentBitProbs}
                   status={detectMode === 'recording' ? 'recording' : detectMode === 'processing' ? 'processing' : 'idle'}
                   inferenceTime={inference.lastInferenceTime}
                   error={inference.error || audioCapture.error}
                 />
               </div>
-              
+
               {/* Upload Section */}
               <div className="lg:col-span-1">
-                <div className="glass rounded-xl p-4">
-                  <h3 className="text-sm font-semibold text-gray-300 mb-3">Upload Audio</h3>
-                  <AudioUploader 
-                    onFileSelect={handleFileSelect}
-                    disabled={detectMode === 'recording' || detectMode === 'processing'}
-                  />
-                  
+                <div className="glass rounded-xl p-4 h-full flex flex-col">
+                  <h3 className="text-sm font-semibold text-gray-300 mb-5 flex-none">Upload Audio</h3>
+                  <div className="flex-1 min-h-[150px]">
+                    <AudioUploader
+                      onFileSelect={handleFileSelect}
+                      disabled={detectMode === 'recording' || detectMode === 'processing'}
+                    />
+                  </div>
+
                   {/* Random Position Detection - Proves cyclic watermark works */}
                   {audioCapture.audioData && audioCapture.audioData.length > 8000 && (
                     <div className="mt-4 pt-4 border-t border-gray-700/50">
@@ -496,7 +498,7 @@ function App() {
                       <p className="text-xs text-gray-500 mb-3">
                         워터마크는 반복 삽입되어 어느 위치에서든 탐지 가능합니다.
                       </p>
-                      
+
                       <div className="flex gap-2 mb-3">
                         <button
                           onClick={handleRandomPositionDetect}
@@ -517,7 +519,7 @@ function App() {
                           📊 전체 분석
                         </button>
                       </div>
-                      
+
                       {/* Current Position Info */}
                       {randomPosition && (
                         <div className="bg-surface/50 rounded-lg p-2 text-xs">
@@ -536,7 +538,7 @@ function App() {
                           </div>
                         </div>
                       )}
-                      
+
                       {/* Multi-chunk Results */}
                       {multiChunkResults && (
                         <div className="mt-3">
@@ -556,10 +558,9 @@ function App() {
                                 </div>
                                 <div className="flex justify-between text-gray-400">
                                   <span>Sync 일치:</span>
-                                  <span className={`font-mono ${
-                                    parseFloat(r.syncScore) >= 80 ? 'text-green-400' :
+                                  <span className={`font-mono ${parseFloat(r.syncScore) >= 80 ? 'text-green-400' :
                                     parseFloat(r.syncScore) >= 50 ? 'text-yellow-400' : 'text-red-400'
-                                  }`}>{r.syncScore}%</span>
+                                    }`}>{r.syncScore}%</span>
                                 </div>
                                 <div className="flex justify-between text-gray-400">
                                   <span>신뢰도:</span>
@@ -578,7 +579,7 @@ function App() {
                 </div>
               </div>
             </div>
-            
+
             {/* Message Comparison Section - Only shows when verifying embedded audio */}
             {originalMessage && currentBitProbs && (
               <section className="glass rounded-2xl p-6 space-y-4">
@@ -588,17 +589,17 @@ function App() {
                   </svg>
                   Verification: Original vs Decoded
                 </h2>
-                <MessageComparison 
+                <MessageComparison
                   originalMessage={originalMessage}
                   decodedProbs={currentBitProbs}
                 />
-                <CRCVerificationPanel 
+                <CRCVerificationPanel
                   decodedMessage={currentBitProbs}
                   originalMessage={originalMessage}
                 />
               </section>
             )}
-            
+
             {/* CRC Verification - Shows even without original message */}
             {!originalMessage && currentBitProbs && (
               <section className="glass rounded-2xl p-6">
@@ -606,19 +607,19 @@ function App() {
                   <span className="text-lg">🔒</span>
                   Payload Verification
                 </h2>
-                <CRCVerificationPanel 
+                <CRCVerificationPanel
                   decodedMessage={currentBitProbs}
                 />
               </section>
             )}
           </>
         )}
-        
+
         {/* Footer */}
         <footer className="text-center text-xs text-gray-500 py-4">
           <p>CallCops Preview • On-device ONNX Inference • 8kHz Audio Watermarking</p>
           <p className="mt-1">
-            Model: {appMode === 'embed' ? 'encoder_int8.onnx' : 'decoder_int8.onnx'} • 
+            Model: {appMode === 'embed' ? 'encoder_int8.onnx' : 'decoder_int8.onnx'} •
             Sample Rate: 8kHz • Payload: 128 bits
           </p>
         </footer>
