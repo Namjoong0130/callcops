@@ -250,9 +250,9 @@ function App() {
 
   return (
     <div className="min-h-screen bg-surface p-4 md:p-8">
-      <div className="max-w-6xl mx-auto space-y-6">
+      <div className="max-w-[95%] mx-auto space-y-6">
         {/* Header */}
-        <header className="glass rounded-2xl p-6">
+        <header className="glass rounded-2xl p-12">
           <div className="flex flex-col md:flex-row md:items-center md:justify-between gap-4">
             {/* Logo & Title */}
             <div className="flex items-center gap-3">
@@ -265,22 +265,22 @@ function App() {
                 <h1 className="text-2xl font-bold bg-gradient-to-r from-primary to-purple-400 bg-clip-text text-transparent">
                   CallCops
                 </h1>
-                <p className="text-sm text-gray-400">Audio Watermarking Demo</p>
+                <p className="text-sm text-gray-400">Audio Watermarking Program</p>
               </div>
             </div>
 
             {/* Mode Toggle */}
-            <div className="flex items-center gap-3">
+            <div className="flex items-center gap-3 pr-16">
               <div className="flex bg-surface/50 rounded-xl p-1">
                 <button
                   onClick={() => setAppMode('embed')}
-                  className={`px-4 py-2 rounded-lg text-sm font-medium transition-all duration-200
+                  className={`w-32 py-2 rounded-lg text-sm font-medium transition-all duration-200
                     ${appMode === 'embed'
-                      ? 'bg-gradient-to-r from-primary to-purple-500 text-white'
-                      : 'text-gray-400 hover:text-gray-200'
+                      ? 'bg-gradient-to-r from-primary to-purple-500 text-white shadow-lg shadow-primary/20'
+                      : 'text-gray-400 hover:text-gray-200 hover:bg-white/5'
                     }`}
                 >
-                  <span className="flex items-center gap-2">
+                  <span className="flex items-center justify-center gap-2">
                     <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                       <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 4v16m8-8H4" />
                     </svg>
@@ -289,13 +289,13 @@ function App() {
                 </button>
                 <button
                   onClick={() => setAppMode('detect')}
-                  className={`px-4 py-2 rounded-lg text-sm font-medium transition-all duration-200
+                  className={`w-32 py-2 rounded-lg text-sm font-medium transition-all duration-200
                     ${appMode === 'detect'
-                      ? 'bg-gradient-to-r from-primary to-purple-500 text-white'
-                      : 'text-gray-400 hover:text-gray-200'
+                      ? 'bg-gradient-to-r from-primary to-purple-500 text-white shadow-lg shadow-primary/20'
+                      : 'text-gray-400 hover:text-gray-200 hover:bg-white/5'
                     }`}
                 >
-                  <span className="flex items-center gap-2">
+                  <span className="flex items-center justify-center gap-2">
                     <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                       <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z" />
                     </svg>
@@ -304,21 +304,7 @@ function App() {
                 </button>
               </div>
 
-              {/* Model Status */}
-              <div className={`
-                px-3 py-1.5 rounded-lg text-xs font-medium
-                ${inference.isReady ? 'bg-green-500/20 text-green-400' :
-                  inference.isLoading ? 'bg-yellow-500/20 text-yellow-400' :
-                    inference.error ? 'bg-red-500/20 text-red-400' :
-                      'bg-gray-500/20 text-gray-400'
-                }
-              `}>
-                {inference.isReady ? '● Model Ready' :
-                  inference.isLoading ? '◐ Loading...' :
-                    inference.error ? '✕ Error' :
-                      '○ Not Loaded'
-                }
-              </div>
+
             </div>
           </div>
         </header>
@@ -400,11 +386,11 @@ function App() {
                 onClick={detectMode === 'recording' ? handleStopRecording : handleStartRecording}
                 disabled={detectMode === 'processing'}
                 className={`
-                  px-6 py-3 rounded-xl font-medium flex items-center gap-2
-                  transition-all duration-200
+                  w-64 py-3 rounded-xl font-medium flex items-center justify-center gap-2
+                  transition-all duration-200 shadow-xl
                   ${detectMode === 'recording'
                     ? 'bg-red-500 hover:bg-red-600 text-white glow'
-                    : 'bg-primary hover:bg-primary/80 text-white'
+                    : 'bg-primary hover:bg-primary/80 text-white shadow-primary/25'
                   }
                   ${detectMode === 'processing' ? 'opacity-50 cursor-not-allowed' : ''}
                 `}
@@ -445,7 +431,7 @@ function App() {
             )}
 
             {/* Waveform Section */}
-            <section className="glass rounded-2xl p-6">
+            <section className="glass rounded-2xl p-12">
               <h2 className="text-lg font-semibold text-gray-200 mb-4">Waveform Analysis</h2>
               <WaveformView
                 audioData={audioCapture.audioData}
@@ -455,6 +441,9 @@ function App() {
                 onPlayStateChange={handlePlayStateChange}
               />
             </section>
+
+            {/* Spacer to force separation */}
+            <div className="h-6"></div>
 
             {/* Bottom Section */}
             <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
@@ -480,7 +469,7 @@ function App() {
 
               {/* Upload Section */}
               <div className="lg:col-span-1">
-                <div className="glass rounded-xl p-4 h-full flex flex-col">
+                <div className="glass rounded-xl p-10 h-full flex flex-col">
                   <h3 className="text-sm font-semibold text-gray-300 mb-5 flex-none">Upload Audio</h3>
                   <div className="flex-1 min-h-[150px]">
                     <AudioUploader

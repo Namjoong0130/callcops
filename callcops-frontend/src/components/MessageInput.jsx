@@ -9,6 +9,7 @@
  */
 
 import { useState, useCallback, useEffect } from 'react';
+import { calculateCRC16 } from '../utils/crc';
 
 // Fixed sync pattern: 1010101010101010
 const SYNC_PATTERN = [1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0];
@@ -23,16 +24,18 @@ export function MessageInput({ message, onChange, disabled = false }) {
   // Store raw hex strings for display (allowing partial input)
   const [timestampHex, setTimestampHex] = useState('');
   const [authHex, setAuthHex] = useState('');
-  
-  // Compute CRC (XOR-based)
+
+  // Compute CRC-16 using standard utility
   const computeCRC = useCallback((data) => {
-    const crc = new Array(CRC_BITS).fill(0);
-    for (let i = 0; i < data.length; i++) {
-      crc[i % CRC_BITS] = (crc[i % CRC_BITS] + data[i]) % 2;
+    const crc = calculateCRC16(data);
+    // Convert 16-bit number to bit array
+    const bits = [];
+    for (let i = 15; i >= 0; i--) {
+      bits.push((crc >> i) & 1);
     }
-    return crc;
+    return bits;
   }, []);
-  
+
   // Convert hex string to bits (pad with zeros on right if needed)
   const hexToBits = useCallback((hex, targetLength) => {
     const bits = [];
@@ -50,32 +53,32 @@ export function MessageInput({ message, onChange, disabled = false }) {
     }
     return bits.slice(0, targetLength);
   }, []);
-  
+
   // Convert bits to hex string
   const bitsToHex = useCallback((bits) => {
     if (!bits || bits.length === 0) return '';
     let hex = '';
     for (let i = 0; i < bits.length; i += 4) {
-      const nibble = (bits[i] || 0) * 8 + (bits[i+1] || 0) * 4 + (bits[i+2] || 0) * 2 + (bits[i+3] || 0);
+      const nibble = (bits[i] || 0) * 8 + (bits[i + 1] || 0) * 4 + (bits[i + 2] || 0) * 2 + (bits[i + 3] || 0);
       hex += nibble.toString(16).toUpperCase();
     }
     return hex;
   }, []);
-  
+
   // Build full 128-bit message from hex strings
   const buildMessage = useCallback(() => {
     // Both fields must have at least some input
     if (!timestampHex && !authHex) return null;
-    
+
     const sync = [...SYNC_PATTERN];
     const timestamp = hexToBits(timestampHex, TIMESTAMP_BITS);
     const auth = hexToBits(authHex, AUTH_BITS);
     const crc = computeCRC([...sync, ...timestamp, ...auth]);
     const fullMessage = [...sync, ...timestamp, ...auth, ...crc];
-    
+
     return new Float32Array(fullMessage);
   }, [timestampHex, authHex, hexToBits, computeCRC]);
-  
+
   // Update parent when hex strings change
   useEffect(() => {
     const msg = buildMessage();
@@ -83,50 +86,50 @@ export function MessageInput({ message, onChange, disabled = false }) {
       onChange(msg);
     }
   }, [timestampHex, authHex, buildMessage, onChange]);
-  
+
   // Handle timestamp input change
   const handleTimestampChange = useCallback((e) => {
     const value = e.target.value.replace(/[^0-9A-Fa-f]/g, '').toUpperCase();
     setTimestampHex(value.slice(0, 8)); // Max 8 hex chars = 32 bits
   }, []);
-  
+
   // Handle auth data input change
   const handleAuthChange = useCallback((e) => {
     const value = e.target.value.replace(/[^0-9A-Fa-f]/g, '').toUpperCase();
     setAuthHex(value.slice(0, 16)); // Max 16 hex chars = 64 bits
   }, []);
-  
+
   // Generate random timestamp
   const generateRandomTimestamp = useCallback(() => {
     const bits = Array.from({ length: TIMESTAMP_BITS }, () => Math.random() > 0.5 ? 1 : 0);
     setTimestampHex(bitsToHex(bits));
   }, [bitsToHex]);
-  
+
   // Generate random auth data
   const generateRandomAuth = useCallback(() => {
     const bits = Array.from({ length: AUTH_BITS }, () => Math.random() > 0.5 ? 1 : 0);
     setAuthHex(bitsToHex(bits));
   }, [bitsToHex]);
-  
+
   // Generate all random
   const generateRandomAll = useCallback(() => {
     generateRandomTimestamp();
     generateRandomAuth();
   }, [generateRandomTimestamp, generateRandomAuth]);
-  
+
   // Calculate CRC for display (based on current input)
   const displayCRC = (timestampHex || authHex)
     ? bitsToHex(computeCRC([
-        ...SYNC_PATTERN, 
-        ...hexToBits(timestampHex, TIMESTAMP_BITS), 
-        ...hexToBits(authHex, AUTH_BITS)
-      ]))
+      ...SYNC_PATTERN,
+      ...hexToBits(timestampHex, TIMESTAMP_BITS),
+      ...hexToBits(authHex, AUTH_BITS)
+    ]))
     : '----';
-  
+
   // Display filled timestamp/auth for visual feedback
   const displayTimestamp = timestampHex.padEnd(8, '·');
   const displayAuth = authHex.padEnd(16, '·');
-  
+
   return (
     <div className="space-y-4">
       {/* Sync Pattern (Fixed) */}
@@ -139,7 +142,7 @@ export function MessageInput({ message, onChange, disabled = false }) {
           1010 1010 1010 1010
         </div>
       </div>
-      
+
       {/* Timestamp (32 bits) */}
       <div className="bg-surface/50 rounded-lg p-3 border border-gray-700/50">
         <div className="flex items-center justify-between mb-2">
@@ -171,7 +174,7 @@ export function MessageInput({ message, onChange, disabled = false }) {
           </span>
         </div>
       </div>
-      
+
       {/* Auth Data (64 bits) */}
       <div className="bg-surface/50 rounded-lg p-3 border border-gray-700/50">
         <div className="flex items-center justify-between mb-2">
@@ -203,7 +206,7 @@ export function MessageInput({ message, onChange, disabled = false }) {
           </span>
         </div>
       </div>
-      
+
       {/* CRC Checksum (Auto-calculated) */}
       <div className="bg-surface/50 rounded-lg p-3 border border-gray-700/50">
         <div className="flex items-center justify-between mb-2">
@@ -214,7 +217,7 @@ export function MessageInput({ message, onChange, disabled = false }) {
           {displayCRC}
         </div>
       </div>
-      
+
       {/* Generate All Button */}
       <button
         onClick={generateRandomAll}
@@ -228,7 +231,7 @@ export function MessageInput({ message, onChange, disabled = false }) {
         </svg>
         Generate Random Payload
       </button>
-      
+
       {/* Payload Structure Info */}
       <div className="text-xs text-gray-500 text-center">
         Total: 128 bits = Sync(16) + Timestamp(32) + Auth(64) + CRC(16)

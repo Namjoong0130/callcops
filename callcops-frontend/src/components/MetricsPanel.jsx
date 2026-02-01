@@ -93,7 +93,7 @@ export function MetricsPanel({
   };
 
   return (
-    <div className="glass rounded-xl p-4 space-y-4 h-full">
+    <div className="glass rounded-xl p-10 space-y-4 h-full">
       <h3 className="text-sm font-semibold text-gray-300">Detection Metrics</h3>
 
       {/* Status */}
@@ -108,7 +108,7 @@ export function MetricsPanel({
       {/* Confidence */}
       <div className="space-y-1">
         <div className="flex items-center justify-between">
-          <span className="text-xs text-gray-500">Confidence</span>
+          <span className="text-[14px] text-gray-500">Confidence</span>
           <span className="text-lg font-bold text-primary">
             {confidence.toFixed(1)}%
           </span>
@@ -119,12 +119,13 @@ export function MetricsPanel({
             style={{ width: `${confidence}%` }}
           />
         </div>
+        <p className="text-[12px] text-gray-500 text-right truncate">비트 예측의 평균 확신도</p>
       </div>
 
       {/* Detection */}
       <div className="space-y-1">
         <div className="flex items-center justify-between">
-          <span className="text-xs text-gray-500">Detection</span>
+          <span className="text-[14px] text-gray-500">Detection</span>
           <span className="text-lg font-bold text-green-400">
             {detection.toFixed(1)}%
           </span>
@@ -135,6 +136,7 @@ export function MetricsPanel({
             style={{ width: `${detection}%` }}
           />
         </div>
+        <p className="text-[12px] text-gray-500 text-right truncate">랜덤 노이즈 대비 신호 강도</p>
       </div>
 
       {/* Bit Breakdown */}

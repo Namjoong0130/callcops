@@ -2,35 +2,38 @@
  * CRC Utilities for Message Verification
  * 
  * 128-bit payload structure:
- * - 120 bits: data
- * - 8 bits: CRC-8 checksum
+ * - 112 bits: data (Sync 16 + Timestamp 32 + Auth 64)
+ * - 16 bits: CRC-16 checksum
  * 
- * This allows error detection and potential correction.
+ * This allows robust error detection and single-bit correction.
  */
 
-// CRC-8 polynomial (x^8 + x^2 + x + 1)
-const CRC8_POLY = 0x07;
+// CRC-16-CCITT polynomial (x^16 + x^12 + x^5 + 1)
+const CRC16_POLY = 0x1021;
 
 /**
- * Calculate CRC-8 checksum
- * @param {Float32Array|number[]} bits - Array of 0/1 values (120 bits for data)
- * @returns {number} 8-bit CRC value
+ * Calculate CRC-16-CCITT checksum (Bit-serial MSB-first)
+ * @param {Float32Array|number[]} bits - Array of 0/1 values
+ * @returns {number} 16-bit CRC value
  */
-export function calculateCRC8(bits) {
-  const data = bitsToBytes(bits.slice(0, 120));
-  let crc = 0x00;
-  
-  for (const byte of data) {
-    crc ^= byte;
-    for (let i = 0; i < 8; i++) {
-      if (crc & 0x80) {
-        crc = ((crc << 1) ^ CRC8_POLY) & 0xFF;
-      } else {
-        crc = (crc << 1) & 0xFF;
-      }
+export function calculateCRC16(bits) {
+  let crc = 0xFFFF; // Initial value
+
+  // Only process the first 112 bits (data portion)
+  const len = Math.min(bits.length, 112);
+
+  for (let i = 0; i < len; i++) {
+    const bit = bits[i] > 0.5 ? 1 : 0;
+
+    // Process bit MSB-first
+    let msb = (crc >> 15) & 1;
+    crc = (crc << 1) & 0xFFFF;
+
+    if (msb ^ bit) {
+      crc ^= CRC16_POLY;
     }
   }
-  
+
   return crc;
 }
 
@@ -42,7 +45,7 @@ export function calculateCRC8(bits) {
 function bitsToBytes(bits) {
   const numBytes = Math.ceil(bits.length / 8);
   const bytes = new Uint8Array(numBytes);
-  
+
   for (let i = 0; i < bits.length; i++) {
     const byteIdx = Math.floor(i / 8);
     const bitIdx = 7 - (i % 8);
@@ -50,19 +53,20 @@ function bitsToBytes(bits) {
       bytes[byteIdx] |= (1 << bitIdx);
     }
   }
-  
+
   return bytes;
 }
 
 /**
- * Convert byte to bit array
- * @param {number} byte 
+ * Convert 16-bit number to bit array
+ * @param {number} value 
+ * @param {number} length 
  * @returns {number[]}
  */
-function byteToBits(byte) {
+function numberToBits(value, length) {
   const bits = [];
-  for (let i = 7; i >= 0; i--) {
-    bits.push((byte >> i) & 1);
+  for (let i = length - 1; i >= 0; i--) {
+    bits.push((value >> i) & 1);
   }
   return bits;
 }
@@ -73,33 +77,40 @@ function byteToBits(byte) {
  * @returns {{ data: number[], crc: number }}
  */
 export function extractCRC(message) {
-  const data = Array.from(message.slice(0, 120)).map(b => b > 0.5 ? 1 : 0);
-  const crcBits = Array.from(message.slice(120, 128)).map(b => b > 0.5 ? 1 : 0);
-  const crc = crcBits.reduce((acc, bit, i) => acc | (bit << (7 - i)), 0);
-  
+  const data = Array.from(message.slice(0, 112)).map(b => b > 0.5 ? 1 : 0);
+  const crcBits = Array.from(message.slice(112, 128)).map(b => b > 0.5 ? 1 : 0);
+
+  // Convert 16 bits back to number
+  let crc = 0;
+  for (let i = 0; i < 16; i++) {
+    if (crcBits[i] > 0.5) {
+      crc |= (1 << (15 - i));
+    }
+  }
+
   return { data, crc };
 }
 
 /**
  * Create 128-bit message with CRC
- * @param {Float32Array|number[]} dataBits - 120 bits of data
+ * @param {Float32Array|number[]} dataBits - 112 bits of data
  * @returns {Float32Array} 128-bit message with CRC appended
  */
 export function createMessageWithCRC(dataBits) {
   const message = new Float32Array(128);
-  
-  // Copy data bits
-  for (let i = 0; i < 120 && i < dataBits.length; i++) {
+
+  // Copy data bits (Sync + Time + Auth = 112 bits)
+  for (let i = 0; i < 112 && i < dataBits.length; i++) {
     message[i] = dataBits[i] > 0.5 ? 1 : 0;
   }
-  
-  // Calculate and append CRC
-  const crc = calculateCRC8(message);
-  const crcBits = byteToBits(crc);
-  for (let i = 0; i < 8; i++) {
-    message[120 + i] = crcBits[i];
+
+  // Calculate and append 16-bit CRC
+  const crc = calculateCRC16(message);
+  const crcBits = numberToBits(crc, 16);
+  for (let i = 0; i < 16; i++) {
+    message[112 + i] = crcBits[i];
   }
-  
+
   return message;
 }
 
@@ -109,15 +120,16 @@ export function createMessageWithCRC(dataBits) {
  * @returns {{ isValid: boolean, expectedCRC: number, actualCRC: number, confidence: number }}
  */
 export function verifyCRC(message) {
-  const { data, crc: actualCRC } = extractCRC(message);
-  const expectedCRC = calculateCRC8(message);
-  
+  const { crc: actualCRC } = extractCRC(message);
+  // Re-calculate expected CRC from the data portion of the received message
+  const expectedCRC = calculateCRC16(message);
+
   const isValid = expectedCRC === actualCRC;
-  
-  // Calculate bit confidence (how far from 0.5)
+
+  // Calculate average bit confidence
   const confidences = Array.from(message).map(b => Math.abs(b - 0.5) * 2);
   const avgConfidence = confidences.reduce((a, b) => a + b, 0) / confidences.length;
-  
+
   return {
     isValid,
     expectedCRC,
@@ -134,7 +146,7 @@ export function verifyCRC(message) {
  */
 export function findSuspiciousBits(probs, threshold = 0.7) {
   const suspicious = [];
-  
+
   for (let i = 0; i < probs.length; i++) {
     const confidence = Math.abs(probs[i] - 0.5) * 2;
     if (confidence < threshold) {
@@ -145,7 +157,7 @@ export function findSuspiciousBits(probs, threshold = 0.7) {
       });
     }
   }
-  
+
   return suspicious.sort((a, b) => a.confidence - b.confidence);
 }
 
@@ -156,7 +168,7 @@ export function findSuspiciousBits(probs, threshold = 0.7) {
  */
 export function attemptCorrection(message) {
   const { isValid } = verifyCRC(message);
-  
+
   if (isValid) {
     return {
       corrected: new Float32Array(message),
@@ -164,14 +176,14 @@ export function attemptCorrection(message) {
       success: true
     };
   }
-  
+
   // Find low-confidence bits and try flipping them
   const suspicious = findSuspiciousBits(message, 0.8);
-  
+
   for (const { index } of suspicious) {
     const trial = new Float32Array(message);
     trial[index] = trial[index] > 0.5 ? 0 : 1;
-    
+
     const { isValid: nowValid } = verifyCRC(trial);
     if (nowValid) {
       return {
@@ -181,7 +193,7 @@ export function attemptCorrection(message) {
       };
     }
   }
-  
+
   return {
     corrected: new Float32Array(message),
     correctedBit: null,
@@ -210,13 +222,13 @@ export function messageToHex(message) {
 export function compareMessages(msg1, msg2) {
   const len = Math.min(msg1.length, msg2.length);
   let matching = 0;
-  
+
   for (let i = 0; i < len; i++) {
     const b1 = msg1[i] > 0.5 ? 1 : 0;
     const b2 = msg2[i] > 0.5 ? 1 : 0;
     if (b1 === b2) matching++;
   }
-  
+
   return {
     matchingBits: matching,
     totalBits: len,
@@ -225,7 +237,7 @@ export function compareMessages(msg1, msg2) {
 }
 
 export default {
-  calculateCRC8,
+  calculateCRC16,
   createMessageWithCRC,
   verifyCRC,
   findSuspiciousBits,

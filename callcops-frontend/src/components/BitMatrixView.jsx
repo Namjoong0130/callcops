@@ -117,7 +117,7 @@ export function BitMatrixView({
   const cols = 16;
 
   return (
-    <div className="glass rounded-xl p-4">
+    <div className="glass rounded-xl p-10">
       <div className="flex items-center justify-between mb-3">
         <h3 className="text-sm font-semibold text-gray-300">Bit Matrix</h3>
         <div className="flex items-center gap-2">

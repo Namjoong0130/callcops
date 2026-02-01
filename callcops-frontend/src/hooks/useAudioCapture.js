@@ -5,27 +5,27 @@
  */
 
 import { useState, useRef, useCallback, useEffect } from 'react';
-import { resampleTo8kHz, toMono, SAMPLE_RATE, WINDOW_SIZE } from '../utils/audioProcessor';
+import { resampleTo8kHz, toMono, parseWav, SAMPLE_RATE, WINDOW_SIZE } from '../utils/audioProcessor';
 
 export function useAudioCapture() {
   const [isRecording, setIsRecording] = useState(false);
   const [audioData, setAudioData] = useState(null);
   const [error, setError] = useState(null);
   const [status, setStatus] = useState('idle'); // idle, recording, processing
-  
+
   const audioContextRef = useRef(null);
   const mediaStreamRef = useRef(null);
   const scriptProcessorRef = useRef(null);
   const audioBufferRef = useRef([]);
   const onAudioChunkRef = useRef(null);
-  
+
   // Cleanup on unmount
   useEffect(() => {
     return () => {
       stopRecording();
     };
   }, []);
-  
+
   /**
    * Start microphone recording
    */
@@ -34,7 +34,7 @@ export function useAudioCapture() {
       setError(null);
       setStatus('recording');
       onAudioChunkRef.current = onAudioChunk;
-      
+
       // Get microphone access
       const stream = await navigator.mediaDevices.getUserMedia({
         audio: {
@@ -44,13 +44,13 @@ export function useAudioCapture() {
           noiseSuppression: true,
         },
       });
-      
+
       mediaStreamRef.current = stream;
-      
+
       // Create audio context
       audioContextRef.current = new AudioContext();
       const source = audioContextRef.current.createMediaStreamSource(stream);
-      
+
       // Use ScriptProcessor for real-time audio access
       // Note: ScriptProcessor is deprecated but still widely supported
       // AudioWorklet would be the modern alternative
@@ -60,27 +60,27 @@ export function useAudioCapture() {
         1,
         1
       );
-      
+
       audioBufferRef.current = [];
       let accumulatedSamples = new Float32Array(0);
       const sourceSampleRate = audioContextRef.current.sampleRate;
       const targetWindowSize = WINDOW_SIZE; // 3200 samples @ 8kHz
       const sourceWindowSize = Math.ceil(targetWindowSize * (sourceSampleRate / SAMPLE_RATE));
-      
+
       scriptProcessorRef.current.onaudioprocess = async (event) => {
         const inputData = event.inputBuffer.getChannelData(0);
-        
+
         // Accumulate samples
         const newAccumulated = new Float32Array(accumulatedSamples.length + inputData.length);
         newAccumulated.set(accumulatedSamples);
         newAccumulated.set(inputData, accumulatedSamples.length);
         accumulatedSamples = newAccumulated;
-        
+
         // Process windows
         while (accumulatedSamples.length >= sourceWindowSize) {
           const windowData = accumulatedSamples.slice(0, sourceWindowSize);
           accumulatedSamples = accumulatedSamples.slice(sourceWindowSize);
-          
+
           // Resample to 8kHz
           try {
             const tempBuffer = audioContextRef.current.createBuffer(
@@ -89,12 +89,12 @@ export function useAudioCapture() {
               sourceSampleRate
             );
             tempBuffer.getChannelData(0).set(windowData);
-            
+
             const resampled = await resampleTo8kHz(tempBuffer);
-            
+
             // Store for full audio
             audioBufferRef.current.push(resampled);
-            
+
             // Call callback with chunk
             if (onAudioChunkRef.current) {
               onAudioChunkRef.current(resampled);
@@ -104,10 +104,10 @@ export function useAudioCapture() {
           }
         }
       };
-      
+
       source.connect(scriptProcessorRef.current);
       scriptProcessorRef.current.connect(audioContextRef.current.destination);
-      
+
       setIsRecording(true);
     } catch (err) {
       setError(err.message);
@@ -115,7 +115,7 @@ export function useAudioCapture() {
       throw err;
     }
   }, []);
-  
+
   /**
    * Stop recording
    */
@@ -124,17 +124,17 @@ export function useAudioCapture() {
       scriptProcessorRef.current.disconnect();
       scriptProcessorRef.current = null;
     }
-    
+
     if (mediaStreamRef.current) {
       mediaStreamRef.current.getTracks().forEach(track => track.stop());
       mediaStreamRef.current = null;
     }
-    
+
     if (audioContextRef.current && audioContextRef.current.state !== 'closed') {
       audioContextRef.current.close();
       audioContextRef.current = null;
     }
-    
+
     // Combine all audio buffers
     if (audioBufferRef.current.length > 0) {
       const totalLength = audioBufferRef.current.reduce((sum, buf) => sum + buf.length, 0);
@@ -146,12 +146,12 @@ export function useAudioCapture() {
       }
       setAudioData(fullAudio);
     }
-    
+
     audioBufferRef.current = [];
     setIsRecording(false);
     setStatus('idle');
   }, []);
-  
+
   /**
    * Load audio from file
    */
@@ -159,30 +159,40 @@ export function useAudioCapture() {
     try {
       setError(null);
       setStatus('processing');
-      
+
       const arrayBuffer = await file.arrayBuffer();
-      const audioContext = new AudioContext();
-      const audioBuffer = await audioContext.decodeAudioData(arrayBuffer);
-      
-      // Convert to mono
-      const monoData = toMono(audioBuffer);
-      
-      // Create mono buffer for resampling
-      const monoBuffer = audioContext.createBuffer(
-        1,
-        monoData.length,
-        audioBuffer.sampleRate
-      );
-      monoBuffer.getChannelData(0).set(monoData);
-      
-      // Resample to 8kHz
-      const resampled = await resampleTo8kHz(monoBuffer);
-      
-      await audioContext.close();
-      
+
+      // Try lossless parsing first (for 8kHz WAV files)
+      const rawData = parseWav(arrayBuffer);
+      let resampled;
+
+      if (rawData) {
+        console.log('Lossless WAV parsing successful');
+        resampled = rawData;
+      } else {
+        const audioContext = new AudioContext();
+        const audioBuffer = await audioContext.decodeAudioData(arrayBuffer);
+
+        // Convert to mono
+        const monoData = toMono(audioBuffer);
+
+        // Create mono buffer for resampling
+        const monoBuffer = audioContext.createBuffer(
+          1,
+          monoData.length,
+          audioBuffer.sampleRate
+        );
+        monoBuffer.getChannelData(0).set(monoData);
+
+        // Resample to 8kHz
+        resampled = await resampleTo8kHz(monoBuffer);
+
+        await audioContext.close();
+      }
+
       setAudioData(resampled);
       setStatus('idle');
-      
+
       // Process in chunks if callback provided
       if (onAudioChunk) {
         const chunkSize = WINDOW_SIZE;
@@ -191,7 +201,7 @@ export function useAudioCapture() {
           onAudioChunk(chunk, i / chunkSize);
         }
       }
-      
+
       return resampled;
     } catch (err) {
       setError(err.message);
@@ -199,7 +209,7 @@ export function useAudioCapture() {
       throw err;
     }
   }, []);
-  
+
   /**
    * Clear audio data
    */
@@ -208,7 +218,7 @@ export function useAudioCapture() {
     setError(null);
     audioBufferRef.current = [];
   }, []);
-  
+
   return {
     isRecording,
     audioData,
