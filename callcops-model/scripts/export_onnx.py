@@ -222,23 +222,16 @@ def quantize_onnx_dynamic(
         print("   Install: pip install onnxruntime onnxruntime-extensions")
         return input_path
     
-    try:
-        quantize_dynamic(
-            model_input=str(input_path),
-            model_output=str(output_path),
-            weight_type=QuantType.QUInt8,
-            per_channel=False,
-            reduce_range=False
-        )
-        print(f"✅ Quantized (Dynamic INT8): {output_path}")
-        print(f"   Size: {output_path.stat().st_size / 1024 / 1024:.2f} MB")
-        
-    except Exception as e:
-        print(f"⚠️  Quantization failed: {e}")
-        print("   Skipping quantization for this model.")
-        if output_path.exists():
-            output_path.unlink()
-        return input_path
+    quantize_dynamic(
+        model_input=str(input_path),
+        model_output=str(output_path),
+        weight_type=QuantType.QUInt8,
+        per_channel=False,
+        reduce_range=False
+    )
+    
+    print(f"✅ Quantized (Dynamic INT8): {output_path}")
+    print(f"   Size: {output_path.stat().st_size / 1024 / 1024:.2f} MB")
     
     return output_path
 

@@ -435,14 +435,32 @@ class CallCopsTrainer:
             except Exception as e:
                 print(f"Warning: Failed to create latest.pth: {e}")
 
-    def load_checkpoint(self, path: Path):
-        """체크포인트 로드"""
+    def load_checkpoint(self, path: Path, new_lr: float = None):
+        """
+        체크포인트 로드
+        
+        Args:
+            path: 체크포인트 경로
+            new_lr: 새 Learning Rate (None이면 저장된 LR 유지, 값 있으면 강제 적용)
+        """
         print(f"Loading checkpoint from {path}...")
         checkpoint = torch.load(path, map_location=self.device)
 
         self.model.load_state_dict(checkpoint['model_state_dict'])
         self.opt_g.load_state_dict(checkpoint['opt_g_state_dict'])
         self.opt_d.load_state_dict(checkpoint['opt_d_state_dict'])
+        
+        # LR 강제 재설정 (Fine-tuning 시 필수!)
+        if new_lr is not None:
+            old_lr = self.opt_g.param_groups[0]['lr']
+            for param_group in self.opt_g.param_groups:
+                param_group['lr'] = new_lr
+            for param_group in self.opt_d.param_groups:
+                param_group['lr'] = new_lr
+            print(f"⚠️ LR Override: {old_lr:.2e} → {new_lr:.2e}")
+        else:
+            print(f"📊 Keeping checkpoint LR: {self.opt_g.param_groups[0]['lr']:.2e}")
+        
         self.current_epoch = checkpoint['epoch'] + 1
         self.global_step = checkpoint['global_step']
         self.best_ber = checkpoint.get('best_ber', 1.0)
@@ -528,6 +546,27 @@ def train(
         )
 
         # ========================================
+        # 3.5 LR Scheduler (ReduceLROnPlateau)
+        # ========================================
+        # 선택 이유: 이 학습에서는 Val Loss 변동폭이 매우 큼 (32~76)
+        # - CosineAnnealing: 고정된 스케줄이므로 갑작스런 spike에 대응 불가
+        # - ReduceLROnPlateau: 실제 성능 기반으로 LR 조정, 불안정한 학습에 적합
+        scheduler_g = optim.lr_scheduler.ReduceLROnPlateau(
+            opt_g,
+            mode='min',          # val_loss를 최소화
+            factor=0.5,          # LR을 절반으로 감소
+            patience=3,          # 3 에포크 동안 개선 없으면 발동
+            min_lr=1e-7          # 최소 LR 하한
+        )
+        scheduler_d = optim.lr_scheduler.ReduceLROnPlateau(
+            opt_d,
+            mode='min',
+            factor=0.5,
+            patience=3,
+            min_lr=1e-7
+        )
+
+        # ========================================
         # 4. Codec Simulator (Optional)
         # ========================================
         codec_sim = None
@@ -553,10 +592,10 @@ def train(
             messenger=messenger
         )
 
-        # 체크포인트 복원
+        # 체크포인트 복원 (LR은 config 값으로 강제 재설정!)
         if resume_path and resume_path.exists():
-            trainer.load_checkpoint(resume_path)
-            messenger.send_message(f"🔄 **Resumed Training** from epoch {trainer.current_epoch}")
+            trainer.load_checkpoint(resume_path, new_lr=lr)  # 중요: config LR 강제 적용
+            messenger.send_message(f"🔄 **Resumed Training** from epoch {trainer.current_epoch}\n📊 LR Override: `{lr:.2e}`")
 
         # ========================================
         # 6. Training Loop
@@ -589,13 +628,34 @@ def train(
             trainer.history['train_ber'].append(train_metrics['ber'])
             trainer.history['val_ber'].append(val_metrics['ber'])
 
+            # LR Scheduler Step (ReduceLROnPlateau: val_loss 기반)
+            scheduler_g.step(val_metrics['loss'])
+            scheduler_d.step(val_metrics['loss'])
+            current_lr = opt_g.param_groups[0]['lr']
+
+            # ========================================
+            # Dynamic Weight Controller (로컬 미니마 탈출)
+            # ========================================
+            # BER이 너무 낮으면 → bit 압박 완화, audio에 집중
+            if val_metrics['ber'] < 0.02:  # BER < 2%
+                old_lambda_bit = loss_fn.lambda_bit
+                loss_fn.lambda_bit = max(0.1, loss_fn.lambda_bit * 0.8)
+                print(f"  🎛️ Dynamic: lambda_bit {old_lambda_bit:.2f} → {loss_fn.lambda_bit:.2f} (BER over-optimized)")
+            
+            # SNR이 너무 낮으면 → audio 압박 강화
+            if val_metrics['snr'] < 15.0:  # SNR < 15dB
+                old_lambda_audio = loss_fn.lambda_audio
+                loss_fn.lambda_audio = min(500.0, loss_fn.lambda_audio * 1.1)
+                print(f"  🎛️ Dynamic: lambda_audio {old_lambda_audio:.1f} → {loss_fn.lambda_audio:.1f} (SNR too low)")
+
             # Summary
             summary_text = (
                 f"✅ **Epoch {epoch+1}/{num_epochs}**\n"
                 f"📉 Train Loss: `{train_metrics['loss_total']:.4f}`\n"
                 f"📉 Val Loss: `{val_metrics['loss']:.4f}`\n"
                 f"🎯 **Val BER**: `{val_metrics['ber']:.4f}`\n"
-                f"🔊 Val SNR: `{val_metrics['snr']:.1f}dB`"
+                f"🔊 Val SNR: `{val_metrics['snr']:.1f}dB`\n"
+                f"📊 LR: `{current_lr:.2e}`"
             )
             
             print(f"\n{summary_text.replace('**', '').replace('`', '')}")
@@ -801,11 +861,16 @@ def main():
             }
         }
 
-    # CLI 인자로 오버라이드
-    config['training']['epochs'] = args.epochs
-    config['training']['batch_size'] = args.batch_size
-    config['training']['learning_rate'] = args.lr
-    config['training']['use_amp'] = not args.no_amp
+    # CLI 인자로 오버라이드 (명시적으로 지정된 경우에만!)
+    # 중요: 기본값(default)은 config 파일을 덮어쓰지 않음
+    if '--epochs' in sys.argv or '-epochs' in sys.argv:
+        config['training']['epochs'] = args.epochs
+    if '--batch_size' in sys.argv or '-batch_size' in sys.argv:
+        config['training']['batch_size'] = args.batch_size
+    if '--lr' in sys.argv or '-lr' in sys.argv:
+        config['training']['learning_rate'] = args.lr
+    if args.no_amp:  # flag 인자는 존재 여부로 판단
+        config['training']['use_amp'] = False
 
     # ========================================
     # 디바이스 설정

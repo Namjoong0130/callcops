@@ -1,0 +1,75 @@
+# CallCops: Fine-tuning Configuration (Resume from Epoch 5)
+# ==========================================================
+# 목표: SNR 20dB+, BER < 10% 유지
+# 전략: Audio Quality 최우선, 안정적인 학습률
+
+# 오디오 규격 (변경 없음)
+audio:
+  sample_rate: 8000
+  bit_depth: 16
+  channels: 1
+  frame_ms: 40
+  frame_samples: 320
+
+# 워터마크 페이로드 (변경 없음)
+watermark:
+  bits_per_frame: 1
+  payload_length: 128
+  sync_pattern: "1010101010101010"
+
+# 모델 아키텍처 (변경 없음)
+model:
+  encoder:
+    channels: [32, 64, 128, 256]
+    kernel_size: 7
+    dilation_base: 2
+    num_layers: 8
+    attention_heads: 4
+
+  decoder:
+    channels: [256, 128, 64, 32]
+    kernel_size: 5
+
+  discriminator:
+    resolutions: [64, 128, 256]
+    channels: [32, 64, 128, 256]
+
+# 학습 설정 (Quality-Centric: SNR 최우선)
+training:
+  batch_size: 24
+  learning_rate: 0.000005   # 5e-6 (안정적 fine-tuning)
+  num_workers: 4
+  adam_betas: [0.5, 0.9]
+  epochs: 50
+  grad_clip: 0.5            # Gradient spike 방지
+  use_amp: true
+
+  # 손실 함수 가중치 (Quality-Centric: SNR > 20dB 목표)
+  # BER은 BCH(511,128)가 10%까지 허용하므로 5-8% 허용
+  lambda_bit: 1.0           # 2.0 → 1.0 (비트 압박 대폭 완화)
+  lambda_audio: 200.0       # 100 → 200 (Mel Loss 최우선)
+  lambda_stft: 30.0         # 20 → 30 (스펙트럼 보존 강화)
+  lambda_l1: 50.0           # 10 → 50 (L1 적당히 상향, 300은 위험)
+  lambda_adv: 0.05          # 유지
+  lambda_det: 0.1           # 유지
+
+# 코덱 시뮬레이터
+codec:
+  enabled: true
+  types: ["g711_alaw", "g711_ulaw", "g729", "amr_nb", "none"]
+  g711_bits: 8
+  g729_bitrate: 8000
+
+# 데이터 증강
+augmentation:
+  noise_snr_range: [15, 40]
+  bandpass_low: 300
+  bandpass_high: 3400
+  codec_prob: 0.7
+
+# 품질 목표
+quality_targets:
+  pesq_min: 4.0
+  ber_max: 0.10             # 5% → 10% (fine-tuning 목표 완화)
+  snr_min: 20.0             # 추가: SNR 20dB 목표
+  latency_max_ms: 200

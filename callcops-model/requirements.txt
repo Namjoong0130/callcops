@@ -30,7 +30,6 @@ soundfile>=0.12.0
 # Mobile export (optional)
 onnx>=1.14.0             # ONNX export
 onnxruntime>=1.15.0      # ONNX runtime
-onnxscript>=0.1.0        # Required for newer PyTorch ONNX export
 
 # Development
 black>=23.0.0            # Code formatting
