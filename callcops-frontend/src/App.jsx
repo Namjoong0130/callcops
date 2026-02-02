@@ -355,7 +355,7 @@ function App() {
                 <div className="grid grid-cols-2 gap-3">
                   <div className="bg-surface/50 rounded-lg p-3">
                     <p className="text-xs text-gray-500">Model</p>
-                    <p className="text-sm font-medium text-gray-200">encoder_int8.onnx</p>
+                    <p className="text-sm font-medium text-gray-200">{inference.encoderModelName}</p>
                   </div>
                   <div className="bg-surface/50 rounded-lg p-3">
                     <p className="text-xs text-gray-500">Sample Rate</p>
@@ -608,7 +608,7 @@ function App() {
         <footer className="text-center text-xs text-gray-500 py-4">
           <p>CallCops Preview • On-device ONNX Inference • 8kHz Audio Watermarking</p>
           <p className="mt-1">
-            Model: {appMode === 'embed' ? 'encoder_int8.onnx' : 'decoder_int8.onnx'} •
+            Model: {appMode === 'embed' ? inference.encoderModelName : inference.decoderModelName} •
             Sample Rate: 8kHz • Payload: 128 bits
           </p>
         </footer>

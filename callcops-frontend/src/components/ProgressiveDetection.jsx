@@ -203,7 +203,7 @@ export function ProgressiveDetection({
       </div>
 
       {/* Bit Matrix with progressive reveal */}
-      <div className="grid grid-cols-16 gap-0.5">
+      <div className="grid grid-cols-16 gap-1">
         {Array.from({ length: 128 }).map((_, i) => {
           const isRevealed = i < revealedCount;
           const prob = revealedBits[i];
@@ -212,7 +212,7 @@ export function ProgressiveDetection({
           return (
             <div
               key={i}
-              className={`aspect-square rounded-sm flex items-center justify-center text-[8px] font-mono font-bold
+              className={`aspect-square rounded-sm flex items-center justify-center text-[11px] font-mono font-bold
                 transition-all duration-200
                 ${isRevealed ? '' : 'opacity-30'}
                 ${i === revealedCount - 1 && isRunning ? 'ring-1 ring-white animate-pulse' : ''}`}
