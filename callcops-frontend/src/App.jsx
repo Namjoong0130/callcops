@@ -16,8 +16,12 @@ import { EmbedPanel } from './components/EmbedPanel';
 import { MessageComparison } from './components/MessageComparison';
 import { CRCVerificationPanel } from './components/CRCVerificationPanel';
 import { ProgressiveDetection } from './components/ProgressiveDetection';
+import PhoneSimulator from './pages/PhoneSimulator';
 
-function App() {
+// Check URL for phone mode
+const isPhoneMode = () => window.location.pathname === '/phone' || window.location.hash === '#phone';
+
+function MainApp() {
   const [appMode, setAppMode] = useState('detect'); // 'embed' or 'detect'
   const [detectMode, setDetectMode] = useState('idle'); // idle, recording, processing
   const [currentBitProbs, setCurrentBitProbs] = useState(null);
@@ -615,6 +619,14 @@ function App() {
       </div>
     </div>
   );
+}
+
+// Router wrapper that chooses between MainApp and PhoneSimulator
+function App() {
+  if (isPhoneMode()) {
+    return <PhoneSimulator />;
+  }
+  return <MainApp />;
 }
 
 export default App;
