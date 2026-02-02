@@ -1,8 +1,8 @@
 /**
  * RealtimeEmbedDemo Component
- * 
- * Demonstrates low-latency real-time watermark embedding
- * using live microphone input with chunk-based processing.
+ *
+ * Real-time watermark embedding demo with frequency spectrum visualization.
+ * Shows live input vs watermarked output spectra with difference highlighting.
  */
 
 import { useState, useCallback, useRef, useEffect } from 'react';
@@ -22,18 +22,18 @@ export function RealtimeEmbedDemo({ onEmbed, isModelReady = false }) {
     totalSamples: 0,
     avgLatency: 0
   });
-  const [audioLevels, setAudioLevels] = useState({ input: 0, output: 0 });
-  
-  // Buffers for oscilloscope visualization
+
+  // Buffers for frequency spectrum visualization
   const [inputBuffer, setInputBuffer] = useState(new Float32Array(2048));
   const [outputBuffer, setOutputBuffer] = useState(new Float32Array(2048));
-  
+
   const mediaStreamRef = useRef(null);
   const audioContextRef = useRef(null);
   const processorRef = useRef(null);
   const latenciesRef = useRef([]);
   const isStreamingRef = useRef(false);
-  
+  const isProcessingRef = useRef(false);  // Lock to prevent overlapping inference
+
   // Generate random 128-bit message
   const generateMessage = useCallback(() => {
     const msg = new Float32Array(128);
@@ -43,16 +43,14 @@ export function RealtimeEmbedDemo({ onEmbed, isModelReady = false }) {
     setMessage(msg);
     return msg;
   }, []);
-  
+
   // Start streaming
   const startStreaming = useCallback(async () => {
     if (!onEmbed || !isModelReady) return;
-    
-    // Generate message if not set
+
     const currentMessage = message || generateMessage();
-    
+
     try {
-      // Get microphone access
       const stream = await navigator.mediaDevices.getUserMedia({
         audio: {
           sampleRate: SAMPLE_RATE,
@@ -61,236 +59,194 @@ export function RealtimeEmbedDemo({ onEmbed, isModelReady = false }) {
           noiseSuppression: true
         }
       });
-      
+
       mediaStreamRef.current = stream;
-      
-      // Create audio context at 8kHz
+
       const audioContext = new (window.AudioContext || window.webkitAudioContext)({
         sampleRate: SAMPLE_RATE
       });
       audioContextRef.current = audioContext;
-      
-      // Create source from microphone
+
       const source = audioContext.createMediaStreamSource(stream);
-      
-      // Create script processor for chunk-based processing
-      const bufferSize = 4096;  // Larger buffer for stability
+
+      // bufferSize=2048 → 256ms at 8kHz. Good balance of latency vs callback overhead.
+      const bufferSize = 2048;
       const processor = audioContext.createScriptProcessor(bufferSize, 1, 1);
       processorRef.current = processor;
-      
+
       let accumulatedSamples = new Float32Array(0);
-      
-      processor.onaudioprocess = async (e) => {
+
+      // NOT async — fire-and-forget inference behind a lock
+      processor.onaudioprocess = (e) => {
         if (!isStreamingRef.current) return;
-        
+
         const inputData = e.inputBuffer.getChannelData(0);
         const outputData = e.outputBuffer.getChannelData(0);
-        
-        // Calculate input level
-        const inputLevel = Math.sqrt(inputData.reduce((sum, s) => sum + s * s, 0) / inputData.length);
-        
+
+        // Always pass through audio (low-latency monitoring)
+        outputData.set(inputData.slice(0, outputData.length));
+
         // Accumulate samples
         const newAccumulated = new Float32Array(accumulatedSamples.length + inputData.length);
         newAccumulated.set(accumulatedSamples);
         newAccumulated.set(inputData, accumulatedSamples.length);
         accumulatedSamples = newAccumulated;
-        
-        // Process when we have enough samples
-        if (accumulatedSamples.length >= CHUNK_SIZE) {
+
+        // Only start inference if not already processing (prevents overlap)
+        if (accumulatedSamples.length >= CHUNK_SIZE && !isProcessingRef.current) {
           const chunk = accumulatedSamples.slice(0, CHUNK_SIZE);
           accumulatedSamples = accumulatedSamples.slice(CHUNK_SIZE);
-          
-          // Measure latency
+
+          isProcessingRef.current = true;
           const startTime = performance.now();
-          
-          try {
-            // Embed watermark into chunk
-            const watermarkedChunk = await onEmbed(chunk, currentMessage);
-            
-            const endTime = performance.now();
-            const latency = endTime - startTime;
-            
-            // Track latencies
+
+          onEmbed(chunk, currentMessage).then(watermarkedChunk => {
+            const latency = performance.now() - startTime;
+
             latenciesRef.current.push(latency);
-            if (latenciesRef.current.length > 100) {
-              latenciesRef.current.shift();
-            }
-            
+            if (latenciesRef.current.length > 50) latenciesRef.current.shift();
             const avgLatency = latenciesRef.current.reduce((a, b) => a + b, 0) / latenciesRef.current.length;
-            
-            // Calculate output level
-            const outputLevel = Math.sqrt(watermarkedChunk.reduce((sum, s) => sum + s * s, 0) / watermarkedChunk.length);
-            
-            // Update stats
+
             setStats(prev => ({
               latencyMs: latency.toFixed(1),
               chunksProcessed: prev.chunksProcessed + 1,
               totalSamples: prev.totalSamples + chunk.length,
               avgLatency: avgLatency.toFixed(1)
             }));
-            
-            setAudioLevels({
-              input: Math.min(inputLevel * 5, 1),
-              output: Math.min(outputLevel * 5, 1)
-            });
-            
-            // Update buffers for oscilloscope (keep last 2048 samples)
+
+            // Update rolling buffers for spectrum visualization
             setInputBuffer(prev => {
               const newBuf = new Float32Array(2048);
-              newBuf.set(prev.slice(chunk.length));
-              newBuf.set(chunk, 2048 - chunk.length);
+              const shift = Math.min(chunk.length, 2048);
+              newBuf.set(prev.slice(shift));
+              newBuf.set(chunk.slice(0, shift), 2048 - shift);
               return newBuf;
             });
-            
+
             setOutputBuffer(prev => {
               const newBuf = new Float32Array(2048);
-              newBuf.set(prev.slice(watermarkedChunk.length));
-              newBuf.set(watermarkedChunk, 2048 - watermarkedChunk.length);
+              const shift = Math.min(watermarkedChunk.length, 2048);
+              newBuf.set(prev.slice(shift));
+              newBuf.set(watermarkedChunk.slice(0, shift), 2048 - shift);
               return newBuf;
             });
-            
-            // Output the watermarked audio (for playback if needed)
-            // Note: In a real app, this would go to speakers
-            for (let i = 0; i < outputData.length && i < watermarkedChunk.length; i++) {
-              outputData[i] = watermarkedChunk[i];
-            }
-          } catch (err) {
+
+            isProcessingRef.current = false;
+          }).catch(err => {
             console.error('Chunk processing error:', err);
-          }
-        } else {
-          // Pass through while accumulating
-          outputData.set(inputData.slice(0, outputData.length));
+            isProcessingRef.current = false;
+          });
         }
       };
-      
-      // Connect nodes
+
       source.connect(processor);
       processor.connect(audioContext.destination);
-      
+
       isStreamingRef.current = true;
+      isProcessingRef.current = false;
       setIsStreaming(true);
       setStats({ latencyMs: 0, chunksProcessed: 0, totalSamples: 0, avgLatency: 0 });
       latenciesRef.current = [];
-      
+
     } catch (err) {
       console.error('Failed to start streaming:', err);
     }
   }, [onEmbed, isModelReady, message, generateMessage]);
-  
+
   // Stop streaming
   const stopStreaming = useCallback(() => {
     isStreamingRef.current = false;
+    isProcessingRef.current = false;
     setIsStreaming(false);
-    
+
     if (processorRef.current) {
       processorRef.current.disconnect();
       processorRef.current = null;
     }
-    
     if (audioContextRef.current) {
       audioContextRef.current.close();
       audioContextRef.current = null;
     }
-    
     if (mediaStreamRef.current) {
       mediaStreamRef.current.getTracks().forEach(track => track.stop());
       mediaStreamRef.current = null;
     }
   }, []);
-  
+
   // Cleanup on unmount
   useEffect(() => {
     return () => {
-      if (isStreamingRef.current) {
-        stopStreaming();
-      }
+      if (isStreamingRef.current) stopStreaming();
     };
   }, [stopStreaming]);
-  
+
   const streamDuration = stats.totalSamples / SAMPLE_RATE;
-  
+
   return (
     <div className="glass rounded-xl p-4 space-y-4">
+      {/* Header */}
       <div className="flex items-center justify-between">
         <h3 className="text-sm font-semibold text-gray-300 flex items-center gap-2">
-          <span className="w-2 h-2 rounded-full bg-green-500 animate-pulse" />
+          {isStreaming && <span className="w-2 h-2 rounded-full bg-green-500 animate-pulse" />}
           Real-Time Streaming Demo
         </h3>
-        <span className="text-xs text-gray-500">Low-Latency Embedding</span>
+        <span className="text-xs text-gray-500">
+          {isStreaming ? `${streamDuration.toFixed(1)}s` : '8 kHz | 160ms Chunks'}
+        </span>
       </div>
-      
-      {/* Status */}
+
       {isStreaming ? (
         <div className="space-y-3">
-          {/* Audio Levels */}
-          <div className="grid grid-cols-2 gap-3">
-            <div>
-              <p className="text-[10px] text-gray-500 mb-1">Input Level</p>
-              <div className="h-2 bg-surface rounded-full overflow-hidden">
-                <div 
-                  className="h-full bg-gradient-to-r from-green-500 to-green-400 transition-all duration-100"
-                  style={{ width: `${audioLevels.input * 100}%` }}
-                />
-              </div>
-            </div>
-            <div>
-              <p className="text-[10px] text-gray-500 mb-1">Output Level</p>
-              <div className="h-2 bg-surface rounded-full overflow-hidden">
-                <div 
-                  className="h-full bg-gradient-to-r from-purple-500 to-purple-400 transition-all duration-100"
-                  style={{ width: `${audioLevels.output * 100}%` }}
-                />
-              </div>
-            </div>
+          {/* Pipeline indicator */}
+          <div className="flex items-center justify-center gap-1 text-[10px] text-gray-400">
+            <span className="px-2 py-0.5 bg-cyan-500/15 text-cyan-400 rounded">MIC</span>
+            <svg className="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5l7 7-7 7" />
+            </svg>
+            <span className="px-2 py-0.5 bg-blue-500/15 text-blue-400 rounded">8kHz Resample</span>
+            <svg className="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5l7 7-7 7" />
+            </svg>
+            <span className="px-2 py-0.5 bg-purple-500/15 text-purple-400 rounded">Encoder (ONNX)</span>
+            <svg className="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5l7 7-7 7" />
+            </svg>
+            <span className="px-2 py-0.5 bg-yellow-500/15 text-yellow-400 rounded">Watermarked Output</span>
           </div>
-          
-          {/* Stats Grid */}
-          <div className="grid grid-cols-4 gap-2">
-            <div className="bg-surface/50 rounded-lg p-2 text-center">
-              <p className="text-[10px] text-gray-500">Latency</p>
-              <p className="text-lg font-mono font-bold text-green-400">{stats.latencyMs}</p>
-              <p className="text-[10px] text-gray-500">ms</p>
-            </div>
-            <div className="bg-surface/50 rounded-lg p-2 text-center">
-              <p className="text-[10px] text-gray-500">Avg Latency</p>
-              <p className="text-lg font-mono font-bold text-blue-400">{stats.avgLatency}</p>
-              <p className="text-[10px] text-gray-500">ms</p>
-            </div>
-            <div className="bg-surface/50 rounded-lg p-2 text-center">
-              <p className="text-[10px] text-gray-500">Chunks</p>
-              <p className="text-lg font-mono font-bold text-yellow-400">{stats.chunksProcessed}</p>
-              <p className="text-[10px] text-gray-500">processed</p>
-            </div>
-            <div className="bg-surface/50 rounded-lg p-2 text-center">
-              <p className="text-[10px] text-gray-500">Duration</p>
-              <p className="text-lg font-mono font-bold text-purple-400">{streamDuration.toFixed(1)}</p>
-              <p className="text-[10px] text-gray-500">sec</p>
-            </div>
-          </div>
-          
-          {/* Info */}
-          <div className="bg-green-500/10 border border-green-500/30 rounded-lg p-3">
-            <p className="text-xs text-green-400">
-              🎤 실시간 워터마킹 진행 중...
-            </p>
-            <p className="text-[10px] text-gray-400 mt-1">
-              마이크 입력 → 160ms 청크 → 워터마크 삽입 → 출력
-            </p>
-          </div>
-          
-          {/* Real-Time Oscilloscope */}
+
+          {/* Real-Time Frequency Spectrum – main visualization */}
           <RealtimeOscilloscope
             inputBuffer={inputBuffer}
             outputBuffer={outputBuffer}
             isActive={isStreaming}
-            width={400}
-            height={120}
+            width={640}
+            height={340}
           />
-          
+
+          {/* Compact stats row */}
+          <div className="grid grid-cols-4 gap-2">
+            <div className="bg-surface/50 rounded-lg px-3 py-2 flex items-baseline justify-between">
+              <span className="text-[10px] text-gray-500">Latency</span>
+              <span className="text-sm font-mono font-bold text-green-400">{stats.latencyMs}<span className="text-[9px] text-gray-500 ml-0.5">ms</span></span>
+            </div>
+            <div className="bg-surface/50 rounded-lg px-3 py-2 flex items-baseline justify-between">
+              <span className="text-[10px] text-gray-500">Avg</span>
+              <span className="text-sm font-mono font-bold text-blue-400">{stats.avgLatency}<span className="text-[9px] text-gray-500 ml-0.5">ms</span></span>
+            </div>
+            <div className="bg-surface/50 rounded-lg px-3 py-2 flex items-baseline justify-between">
+              <span className="text-[10px] text-gray-500">Chunks</span>
+              <span className="text-sm font-mono font-bold text-yellow-400">{stats.chunksProcessed}</span>
+            </div>
+            <div className="bg-surface/50 rounded-lg px-3 py-2 flex items-baseline justify-between">
+              <span className="text-[10px] text-gray-500">Duration</span>
+              <span className="text-sm font-mono font-bold text-purple-400">{streamDuration.toFixed(1)}<span className="text-[9px] text-gray-500 ml-0.5">s</span></span>
+            </div>
+          </div>
+
           {/* Stop Button */}
           <button
             onClick={stopStreaming}
-            className="w-full py-3 bg-red-500/20 hover:bg-red-500/30 text-red-400 
+            className="w-full py-3 bg-red-500/20 hover:bg-red-500/30 text-red-400
                      rounded-xl font-medium transition-colors flex items-center justify-center gap-2"
           >
             <svg className="w-5 h-5" fill="currentColor" viewBox="0 0 24 24">
@@ -301,20 +257,15 @@ export function RealtimeEmbedDemo({ onEmbed, isModelReady = false }) {
         </div>
       ) : (
         <div className="space-y-3">
-          <div className="bg-surface/50 rounded-lg p-4 text-center">
-            <svg className="w-12 h-12 mx-auto text-gray-600 mb-2" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} 
-                    d="M19 11a7 7 0 01-7 7m0 0a7 7 0 01-7-7m7 7v4m0 0H8m4 0h4m-4-8a3 3 0 01-3-3V5a3 3 0 116 0v6a3 3 0 01-3 3z" />
-            </svg>
-            <p className="text-sm text-gray-400">
-              마이크 입력을 실시간으로 워터마킹
-            </p>
-            <p className="text-xs text-gray-500 mt-1">
-              160ms 청크 단위 저지연 처리
-            </p>
-          </div>
-          
-          {/* Start Button */}
+          {/* Idle – spectrum placeholder + start button */}
+          <RealtimeOscilloscope
+            inputBuffer={inputBuffer}
+            outputBuffer={outputBuffer}
+            isActive={false}
+            width={640}
+            height={340}
+          />
+
           <button
             onClick={startStreaming}
             disabled={!isModelReady}
@@ -330,11 +281,10 @@ export function RealtimeEmbedDemo({ onEmbed, isModelReady = false }) {
             </svg>
             실시간 스트리밍 시작
           </button>
-          
-          {/* Performance Note */}
-          <div className="text-center text-[10px] text-gray-500">
-            <p>🚀 목표 지연: &lt;100ms | 청크 크기: 160ms (1280 samples)</p>
-            <p>WebAudio API + ONNX Runtime Web</p>
+
+          <div className="text-center text-[10px] text-gray-500 space-y-0.5">
+            <p>160ms 청크 단위 저지연 처리 | WebAudio + ONNX Runtime Web</p>
+            <p>Original(파란색) vs Watermarked(보라색) 주파수 스펙트럼을 실시간 비교합니다</p>
           </div>
         </div>
       )}

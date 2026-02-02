@@ -1,256 +1,358 @@
 /**
- * Real-Time Oscilloscope Component
- * 
- * Displays scrolling waveform and spectrogram in real-time:
- * - Top: Input waveform (blue)
- * - Middle: Output waveform (purple/watermarked)
- * - Bottom: Spectrogram showing frequency differences
+ * RealtimeOscilloscope - Real-Time Frequency Spectrum Analyzer
+ *
+ * Shows overlaid frequency spectra of original and watermarked audio:
+ * - X-axis: ~31 Hz (left) → 4000 Hz (right), 8kHz sampling
+ * - Original audio spectrum (cyan fill + line)
+ * - Watermarked output spectrum (purple line overlay)
+ * - Difference highlighting (yellow = watermark perturbation)
+ *
+ * Optimized: FFT cached (only recomputed on buffer change), 30fps render.
  */
 
-import { useRef, useEffect, useCallback } from 'react';
+import { useRef, useEffect, useCallback, useMemo } from 'react';
 
-const SAMPLE_RATE = 8000;
-const FFT_SIZE = 256;
-const SCROLL_SPEED = 2;  // pixels per frame
+const FFT_SIZE = 1024;
+const NUM_BINS = FFT_SIZE / 2;       // 512 bins, 0–4 kHz
+const SMOOTHING = 0.5;               // Moderate smoothing, smooth at 30fps
+const DC_SKIP_BINS = 4;              // Skip 0-31 Hz (DC + sub-bass noise)
+const DISPLAY_BINS = NUM_BINS - DC_SKIP_BINS;
+const DB_MIN = -80;
+const DB_MAX = 0;
+const DB_RANGE = DB_MAX - DB_MIN;
+const TARGET_FPS = 30;
+const FRAME_INTERVAL = 1000 / TARGET_FPS;  // ~33ms
 
-export function RealtimeOscilloscope({ 
-  inputBuffer,      // Float32Array of recent input samples
-  outputBuffer,     // Float32Array of recent output samples
+export function RealtimeOscilloscope({
+  inputBuffer,
+  outputBuffer,
   isActive = false,
-  width = 400,
-  height = 200
+  width = 640,
+  height = 340
 }) {
   const canvasRef = useRef(null);
-  const spectrogramCanvasRef = useRef(null);
+  const diffCanvasRef = useRef(null);
   const animationRef = useRef(null);
-  const inputHistoryRef = useRef([]);
-  const outputHistoryRef = useRef([]);
-  const spectrogramHistoryRef = useRef([]);
-  
-  // Initialize canvases
-  useEffect(() => {
-    const canvas = canvasRef.current;
-    const spectroCanvas = spectrogramCanvasRef.current;
-    if (!canvas || !spectroCanvas) return;
-    
-    const ctx = canvas.getContext('2d');
-    const spectroCtx = spectroCanvas.getContext('2d');
-    
-    // Clear with dark background
-    ctx.fillStyle = '#0f172a';
-    ctx.fillRect(0, 0, canvas.width, canvas.height);
-    
-    spectroCtx.fillStyle = '#0f172a';
-    spectroCtx.fillRect(0, 0, spectroCanvas.width, spectroCanvas.height);
-    
-    // Initialize history arrays
-    inputHistoryRef.current = new Array(Math.ceil(width / SCROLL_SPEED)).fill(0);
-    outputHistoryRef.current = new Array(Math.ceil(width / SCROLL_SPEED)).fill(0);
-    spectrogramHistoryRef.current = new Array(Math.ceil(width / SCROLL_SPEED)).fill(null);
-    
-  }, [width, height]);
-  
-  // Calculate FFT for spectrogram
-  const calculateFFT = useCallback((samples) => {
-    if (!samples || samples.length < FFT_SIZE) return null;
-    
-    // Simple DFT for visualization (not optimized, but works for demo)
-    const magnitudes = new Float32Array(FFT_SIZE / 2);
-    
-    for (let k = 0; k < FFT_SIZE / 2; k++) {
-      let real = 0, imag = 0;
-      for (let n = 0; n < FFT_SIZE; n++) {
-        const sample = samples[samples.length - FFT_SIZE + n] || 0;
-        const angle = (2 * Math.PI * k * n) / FFT_SIZE;
-        real += sample * Math.cos(angle);
-        imag -= sample * Math.sin(angle);
-      }
-      magnitudes[k] = Math.sqrt(real * real + imag * imag) / FFT_SIZE;
+  const lastFrameTimeRef = useRef(0);
+
+  // Buffer refs — animation loop reads from these without re-triggering effects
+  const inputBufferRef = useRef(inputBuffer);
+  const outputBufferRef = useRef(outputBuffer);
+  inputBufferRef.current = inputBuffer;
+  outputBufferRef.current = outputBuffer;
+
+  // FFT cache: only recompute when buffer identity changes
+  const lastInputIdRef = useRef(null);
+  const lastOutputIdRef = useRef(null);
+  const cachedInSpecRef = useRef(new Float32Array(NUM_BINS).fill(DB_MIN));
+  const cachedOutSpecRef = useRef(new Float32Array(NUM_BINS).fill(DB_MIN));
+
+  // Smoothed spectrum arrays
+  const smoothedInRef = useRef(new Float32Array(NUM_BINS).fill(DB_MIN));
+  const smoothedOutRef = useRef(new Float32Array(NUM_BINS).fill(DB_MIN));
+
+  // Pre-compute Hanning window once
+  const hannWindow = useMemo(() => {
+    const w = new Float32Array(FFT_SIZE);
+    for (let i = 0; i < FFT_SIZE; i++) {
+      w[i] = 0.5 * (1 - Math.cos((2 * Math.PI * i) / (FFT_SIZE - 1)));
     }
-    
-    return magnitudes;
+    return w;
   }, []);
-  
-  // Get color for spectrogram value
-  const getSpectrogramColor = (value, isOutput = false) => {
-    const intensity = Math.min(1, value * 50);  // Scale up for visibility
-    
-    if (isOutput) {
-      // Purple gradient for output
-      const r = Math.floor(intensity * 147);
-      const g = Math.floor(intensity * 51);
-      const b = Math.floor(intensity * 234);
-      return `rgb(${r}, ${g}, ${b})`;
-    } else {
-      // Blue gradient for input
-      const r = Math.floor(intensity * 59);
-      const g = Math.floor(intensity * 130);
-      const b = Math.floor(intensity * 246);
-      return `rgb(${r}, ${g}, ${b})`;
-    }
-  };
-  
-  // Animation loop
-  useEffect(() => {
-    if (!isActive) {
-      if (animationRef.current) {
-        cancelAnimationFrame(animationRef.current);
+
+  // Radix-2 Cooley-Tukey FFT (in-place)
+  const fft = useCallback((re, im) => {
+    const n = re.length;
+    for (let i = 1, j = 0; i < n; i++) {
+      let bit = n >> 1;
+      while (j & bit) { j ^= bit; bit >>= 1; }
+      j ^= bit;
+      if (i < j) {
+        [re[i], re[j]] = [re[j], re[i]];
+        [im[i], im[j]] = [im[j], im[i]];
       }
-      return;
     }
-    
-    const canvas = canvasRef.current;
-    const spectroCanvas = spectrogramCanvasRef.current;
-    if (!canvas || !spectroCanvas) return;
-    
-    const ctx = canvas.getContext('2d');
-    const spectroCtx = spectroCanvas.getContext('2d');
-    const waveHeight = height / 2;
-    
-    const render = () => {
-      // Scroll existing content left
-      const imageData = ctx.getImageData(SCROLL_SPEED, 0, canvas.width - SCROLL_SPEED, canvas.height);
-      ctx.putImageData(imageData, 0, 0);
-      
-      const spectroImageData = spectroCtx.getImageData(SCROLL_SPEED, 0, spectroCanvas.width - SCROLL_SPEED, spectroCanvas.height);
-      spectroCtx.putImageData(spectroImageData, 0, 0);
-      
-      // Clear right edge
-      ctx.fillStyle = '#0f172a';
-      ctx.fillRect(canvas.width - SCROLL_SPEED, 0, SCROLL_SPEED, canvas.height);
-      
-      spectroCtx.fillStyle = '#0f172a';
-      spectroCtx.fillRect(spectroCanvas.width - SCROLL_SPEED, 0, SCROLL_SPEED, spectroCanvas.height);
-      
-      // Get current samples
-      const inputSample = inputBuffer && inputBuffer.length > 0 
-        ? inputBuffer[inputBuffer.length - 1] || 0 
-        : 0;
-      const outputSample = outputBuffer && outputBuffer.length > 0 
-        ? outputBuffer[outputBuffer.length - 1] || 0 
-        : 0;
-      
-      // Draw input waveform (top half, blue)
-      const inputY = waveHeight / 2 + inputSample * (waveHeight / 2 - 10);
-      ctx.fillStyle = '#3b82f6';
-      ctx.fillRect(canvas.width - SCROLL_SPEED, inputY - 1, SCROLL_SPEED, 3);
-      
-      // Center line for input
-      ctx.fillStyle = '#374151';
-      ctx.fillRect(canvas.width - SCROLL_SPEED, waveHeight / 2, SCROLL_SPEED, 1);
-      
-      // Draw output waveform (bottom half, purple)
-      const outputY = waveHeight + waveHeight / 2 + outputSample * (waveHeight / 2 - 10);
-      ctx.fillStyle = '#a855f7';
-      ctx.fillRect(canvas.width - SCROLL_SPEED, outputY - 1, SCROLL_SPEED, 3);
-      
-      // Center line for output
-      ctx.fillStyle = '#374151';
-      ctx.fillRect(canvas.width - SCROLL_SPEED, waveHeight + waveHeight / 2, SCROLL_SPEED, 1);
-      
-      // Separator line
-      ctx.fillStyle = '#4b5563';
-      ctx.fillRect(canvas.width - SCROLL_SPEED, waveHeight - 1, SCROLL_SPEED, 2);
-      
-      // Calculate and draw spectrogram
-      if (inputBuffer && inputBuffer.length >= FFT_SIZE) {
-        const inputFFT = calculateFFT(Array.from(inputBuffer.slice(-FFT_SIZE)));
-        const outputFFT = outputBuffer && outputBuffer.length >= FFT_SIZE 
-          ? calculateFFT(Array.from(outputBuffer.slice(-FFT_SIZE)))
-          : null;
-        
-        if (inputFFT) {
-          const spectroHeight = spectroCanvas.height / 2;
-          const binHeight = spectroHeight / (FFT_SIZE / 2);
-          
-          // Draw input spectrogram (top)
-          for (let i = 0; i < FFT_SIZE / 2; i++) {
-            spectroCtx.fillStyle = getSpectrogramColor(inputFFT[i], false);
-            spectroCtx.fillRect(
-              spectroCanvas.width - SCROLL_SPEED,
-              spectroHeight - (i + 1) * binHeight,
-              SCROLL_SPEED,
-              binHeight
-            );
-          }
-          
-          // Draw output spectrogram (bottom)
-          if (outputFFT) {
-            for (let i = 0; i < FFT_SIZE / 2; i++) {
-              spectroCtx.fillStyle = getSpectrogramColor(outputFFT[i], true);
-              spectroCtx.fillRect(
-                spectroCanvas.width - SCROLL_SPEED,
-                spectroHeight + spectroHeight - (i + 1) * binHeight,
-                SCROLL_SPEED,
-                binHeight
-              );
-            }
-          }
-          
-          // Separator
-          spectroCtx.fillStyle = '#4b5563';
-          spectroCtx.fillRect(spectroCanvas.width - SCROLL_SPEED, spectroHeight - 1, SCROLL_SPEED, 2);
+    for (let len = 2; len <= n; len <<= 1) {
+      const half = len >> 1;
+      const ang = (-2 * Math.PI) / len;
+      const wRe = Math.cos(ang), wIm = Math.sin(ang);
+      for (let i = 0; i < n; i += len) {
+        let cRe = 1, cIm = 0;
+        for (let j = 0; j < half; j++) {
+          const a = i + j, b = a + half;
+          const tRe = re[b] * cRe - im[b] * cIm;
+          const tIm = re[b] * cIm + im[b] * cRe;
+          re[b] = re[a] - tRe; im[b] = im[a] - tIm;
+          re[a] += tRe;        im[a] += tIm;
+          const tmp = cRe * wRe - cIm * wIm;
+          cIm = cRe * wIm + cIm * wRe;
+          cRe = tmp;
         }
       }
-      
+    }
+  }, []);
+
+  // Compute magnitude spectrum (dB) with DC removal
+  const computeSpectrum = useCallback((buffer) => {
+    const mags = new Float32Array(NUM_BINS);
+    if (!buffer || buffer.length < FFT_SIZE) { mags.fill(DB_MIN); return mags; }
+
+    const re = new Float32Array(FFT_SIZE);
+    const im = new Float32Array(FFT_SIZE);
+    const off = Math.max(0, buffer.length - FFT_SIZE);
+
+    // DC removal
+    let mean = 0;
+    for (let i = 0; i < FFT_SIZE; i++) mean += (buffer[off + i] || 0);
+    mean /= FFT_SIZE;
+
+    for (let i = 0; i < FFT_SIZE; i++) {
+      re[i] = ((buffer[off + i] || 0) - mean) * hannWindow[i];
+    }
+
+    fft(re, im);
+
+    for (let i = 0; i < NUM_BINS; i++) {
+      const mag = Math.sqrt(re[i] * re[i] + im[i] * im[i]) / FFT_SIZE;
+      mags[i] = 20 * Math.log10(Math.max(mag, 1e-10));
+    }
+    return mags;
+  }, [fft, hannWindow]);
+
+  // ── Render loop ──
+  useEffect(() => {
+    if (!isActive) {
+      if (animationRef.current) { cancelAnimationFrame(animationRef.current); animationRef.current = null; }
+      return;
+    }
+
+    const canvas = canvasRef.current;
+    const diffCanvas = diffCanvasRef.current;
+    if (!canvas || !diffCanvas) return;
+
+    const ctx = canvas.getContext('2d');
+    const dCtx = diffCanvas.getContext('2d');
+    const dpr = window.devicePixelRatio || 1;
+
+    const MAIN_H = Math.round(height * 0.68);
+    const DIFF_H = Math.round(height * 0.32);
+
+    canvas.width = width * dpr;   canvas.height = MAIN_H * dpr; ctx.scale(dpr, dpr);
+    diffCanvas.width = width * dpr; diffCanvas.height = DIFF_H * dpr; dCtx.scale(dpr, dpr);
+
+    const PL = 48, PR = 16, PT = 28, PB = 30;
+    const pW = width - PL - PR, pH = MAIN_H - PT - PB;
+
+    const dPT = 22, dPB = 26;
+    const dpH = DIFF_H - dPT - dPB;
+    const DIFF_MAX = 6, DIFF_MIN = -6, DIFF_R = DIFF_MAX - DIFF_MIN;
+
+    const binX = (bin) => PL + ((bin - DC_SKIP_BINS) / DISPLAY_BINS) * pW;
+    const dbY  = (db) => PT + pH * (1 - (Math.max(DB_MIN, Math.min(DB_MAX, db)) - DB_MIN) / DB_RANGE);
+    const dffY = (d)  => dPT + dpH * (1 - (Math.max(DIFF_MIN, Math.min(DIFF_MAX, d)) - DIFF_MIN) / DIFF_R);
+    const fqX  = (hz) => { const bin = hz / (8000 / FFT_SIZE); return PL + (Math.max(0, bin - DC_SKIP_BINS) / DISPLAY_BINS) * pW; };
+
+    const freqs = [0, 500, 1000, 1500, 2000, 2500, 3000, 3500, 4000];
+    const barW = pW / DISPLAY_BINS;
+
+    const render = (now) => {
       animationRef.current = requestAnimationFrame(render);
-    };
-    
-    animationRef.current = requestAnimationFrame(render);
-    
-    return () => {
-      if (animationRef.current) {
-        cancelAnimationFrame(animationRef.current);
+
+      // Throttle to TARGET_FPS
+      if (now - lastFrameTimeRef.current < FRAME_INTERVAL) return;
+      lastFrameTimeRef.current = now;
+
+      // ── Recompute FFT only when buffer has changed ──
+      const curIn = inputBufferRef.current;
+      const curOut = outputBufferRef.current;
+      if (curIn !== lastInputIdRef.current)  { cachedInSpecRef.current  = computeSpectrum(curIn);  lastInputIdRef.current  = curIn; }
+      if (curOut !== lastOutputIdRef.current) { cachedOutSpecRef.current = computeSpectrum(curOut); lastOutputIdRef.current = curOut; }
+
+      const inSpec = cachedInSpecRef.current;
+      const outSpec = cachedOutSpecRef.current;
+
+      // Smoothing
+      const sIn = smoothedInRef.current, sOut = smoothedOutRef.current;
+      for (let i = 0; i < NUM_BINS; i++) {
+        sIn[i]  = SMOOTHING * sIn[i]  + (1 - SMOOTHING) * inSpec[i];
+        sOut[i] = SMOOTHING * sOut[i] + (1 - SMOOTHING) * outSpec[i];
       }
+
+      // ═══════ MAIN CANVAS ═══════
+      ctx.fillStyle = '#0b1120';
+      ctx.fillRect(0, 0, width, MAIN_H);
+
+      // Grid
+      ctx.strokeStyle = '#1a2540'; ctx.lineWidth = 0.5;
+      for (let db = DB_MIN; db <= DB_MAX; db += 10) {
+        const y = dbY(db);
+        ctx.beginPath(); ctx.moveTo(PL, y); ctx.lineTo(PL + pW, y); ctx.stroke();
+        ctx.fillStyle = '#475569'; ctx.font = '9px monospace'; ctx.textAlign = 'right';
+        ctx.fillText(`${db}`, PL - 5, y + 3);
+      }
+      for (const f of freqs) {
+        const x = fqX(f); if (x < PL) continue;
+        ctx.beginPath(); ctx.moveTo(x, PT); ctx.lineTo(x, PT + pH); ctx.stroke();
+        ctx.fillStyle = '#475569'; ctx.font = '9px monospace'; ctx.textAlign = 'center';
+        ctx.fillText(f >= 1000 ? `${f / 1000}k` : `${f}`, x, PT + pH + 14);
+      }
+      ctx.fillStyle = '#64748b'; ctx.font = '9px sans-serif'; ctx.textAlign = 'center';
+      ctx.fillText('Frequency (Hz)', PL + pW / 2, PT + pH + 26);
+      ctx.save(); ctx.translate(11, PT + pH / 2); ctx.rotate(-Math.PI / 2);
+      ctx.fillStyle = '#64748b'; ctx.font = '9px sans-serif'; ctx.textAlign = 'center';
+      ctx.fillText('Magnitude (dB)', 0, 0); ctx.restore();
+
+      // Diff highlight bars
+      for (let i = DC_SKIP_BINS; i < NUM_BINS; i++) {
+        const d = sOut[i] - sIn[i]; if (Math.abs(d) < 0.3) continue;
+        const x = binX(i), y1 = dbY(sIn[i]), y2 = dbY(sOut[i]);
+        const a = Math.min(0.75, Math.min(Math.abs(d), 20) / 12);
+        ctx.fillStyle = d > 0 ? `rgba(250,204,21,${a})` : `rgba(248,113,113,${a})`;
+        ctx.fillRect(x, Math.min(y1, y2), barW + 0.5, Math.abs(y2 - y1) || 1);
+      }
+
+      // Input fill
+      ctx.beginPath(); ctx.moveTo(binX(DC_SKIP_BINS), dbY(DB_MIN));
+      for (let i = DC_SKIP_BINS; i < NUM_BINS; i++) ctx.lineTo(binX(i), dbY(sIn[i]));
+      ctx.lineTo(binX(NUM_BINS - 1), dbY(DB_MIN)); ctx.closePath();
+      const gIn = ctx.createLinearGradient(0, PT, 0, PT + pH);
+      gIn.addColorStop(0, 'rgba(56,189,248,0.35)'); gIn.addColorStop(1, 'rgba(56,189,248,0.03)');
+      ctx.fillStyle = gIn; ctx.fill();
+
+      // Input line
+      ctx.beginPath();
+      for (let i = DC_SKIP_BINS; i < NUM_BINS; i++) {
+        const x = binX(i), y = dbY(sIn[i]);
+        i === DC_SKIP_BINS ? ctx.moveTo(x, y) : ctx.lineTo(x, y);
+      }
+      ctx.strokeStyle = 'rgba(56,189,248,0.85)'; ctx.lineWidth = 1.2; ctx.stroke();
+
+      // Output line
+      ctx.beginPath();
+      for (let i = DC_SKIP_BINS; i < NUM_BINS; i++) {
+        const x = binX(i), y = dbY(sOut[i]);
+        i === DC_SKIP_BINS ? ctx.moveTo(x, y) : ctx.lineTo(x, y);
+      }
+      ctx.strokeStyle = 'rgba(192,132,252,0.95)'; ctx.lineWidth = 1.8; ctx.stroke();
+
+      // Legend
+      ctx.fillStyle = '#e2e8f0'; ctx.font = 'bold 11px sans-serif'; ctx.textAlign = 'left';
+      ctx.fillText('Real-Time Frequency Spectrum', PL, 16);
+      const lx = PL + pW - 250;
+      ctx.fillStyle = 'rgba(56,189,248,0.9)';  ctx.fillRect(lx, 7, 14, 4);
+      ctx.fillStyle = '#94a3b8'; ctx.font = '10px sans-serif'; ctx.fillText('Original', lx + 18, 13);
+      ctx.fillStyle = 'rgba(192,132,252,0.9)'; ctx.fillRect(lx + 80, 7, 14, 4);
+      ctx.fillStyle = '#94a3b8'; ctx.fillText('Watermarked', lx + 98, 13);
+      ctx.fillStyle = 'rgba(250,204,21,0.7)';  ctx.fillRect(lx + 180, 7, 14, 4);
+      ctx.fillStyle = '#94a3b8'; ctx.fillText('Diff', lx + 198, 13);
+
+      // ═══════ DIFF CANVAS ═══════
+      dCtx.fillStyle = '#0b1120'; dCtx.fillRect(0, 0, width, DIFF_H);
+
+      // Zero line
+      const zy = dffY(0);
+      dCtx.strokeStyle = '#334155'; dCtx.lineWidth = 1;
+      dCtx.setLineDash([4, 3]);
+      dCtx.beginPath(); dCtx.moveTo(PL, zy); dCtx.lineTo(PL + pW, zy); dCtx.stroke();
+      dCtx.setLineDash([]);
+
+      // +/- grid
+      for (const d of [-4, -2, 2, 4]) {
+        const y = dffY(d);
+        dCtx.strokeStyle = '#1a2540'; dCtx.lineWidth = 0.5;
+        dCtx.beginPath(); dCtx.moveTo(PL, y); dCtx.lineTo(PL + pW, y); dCtx.stroke();
+        dCtx.fillStyle = '#475569'; dCtx.font = '8px monospace'; dCtx.textAlign = 'right';
+        dCtx.fillText(`${d > 0 ? '+' : ''}${d}`, PL - 4, y + 3);
+      }
+      for (const f of freqs) {
+        const x = fqX(f); if (x < PL) continue;
+        dCtx.strokeStyle = '#1a2540'; dCtx.lineWidth = 0.5;
+        dCtx.beginPath(); dCtx.moveTo(x, dPT); dCtx.lineTo(x, dPT + dpH); dCtx.stroke();
+        dCtx.fillStyle = '#475569'; dCtx.font = '8px monospace'; dCtx.textAlign = 'center';
+        dCtx.fillText(f >= 1000 ? `${f / 1000}k` : `${f}`, x, dPT + dpH + 12);
+      }
+      dCtx.fillStyle = '#64748b'; dCtx.font = '9px sans-serif'; dCtx.textAlign = 'center';
+      dCtx.fillText('Hz', PL + pW / 2, dPT + dpH + 22);
+
+      // Diff bars
+      for (let i = DC_SKIP_BINS; i < NUM_BINS; i++) {
+        const d = sOut[i] - sIn[i]; if (Math.abs(d) < 0.15) continue;
+        const x = binX(i), y = dffY(d);
+        const a = 0.3 + (Math.min(Math.abs(d), 6) / 6) * 0.65;
+        dCtx.fillStyle = d > 0 ? `rgba(250,204,21,${a})` : `rgba(248,113,113,${a})`;
+        dCtx.fillRect(x, Math.min(zy, y), barW + 0.5, Math.abs(zy - y) || 1);
+      }
+
+      // Diff line
+      dCtx.beginPath();
+      for (let i = DC_SKIP_BINS; i < NUM_BINS; i++) {
+        const d = sOut[i] - sIn[i], x = binX(i), y = dffY(d);
+        i === DC_SKIP_BINS ? dCtx.moveTo(x, y) : dCtx.lineTo(x, y);
+      }
+      dCtx.strokeStyle = 'rgba(250,204,21,0.9)'; dCtx.lineWidth = 1.2; dCtx.stroke();
+
+      // Title + stats
+      dCtx.fillStyle = '#e2e8f0'; dCtx.font = 'bold 10px sans-serif'; dCtx.textAlign = 'left';
+      dCtx.fillText('Watermark Perturbation: encoder(audio, msg) \u2212 audio', PL, 14);
+
+      let sumD = 0, maxD = 0, peakB = DC_SKIP_BINS;
+      for (let i = DC_SKIP_BINS; i < NUM_BINS; i++) {
+        const d = Math.abs(sOut[i] - sIn[i]); sumD += d;
+        if (d > maxD) { maxD = d; peakB = i; }
+      }
+      dCtx.fillStyle = '#94a3b8'; dCtx.font = '9px monospace'; dCtx.textAlign = 'right';
+      dCtx.fillText(
+        `avg \u0394${(sumD / DISPLAY_BINS).toFixed(1)}dB  peak \u0394${maxD.toFixed(1)}dB @ ${Math.round((peakB / NUM_BINS) * 4000)}Hz`,
+        PL + pW, 14
+      );
     };
-  }, [isActive, inputBuffer, outputBuffer, height, calculateFFT]);
-  
+
+    animationRef.current = requestAnimationFrame(render);
+    return () => { if (animationRef.current) cancelAnimationFrame(animationRef.current); };
+  }, [isActive, width, height, computeSpectrum]);
+
+  // Reset on streaming start
+  useEffect(() => {
+    if (isActive) {
+      smoothedInRef.current.fill(DB_MIN);
+      smoothedOutRef.current.fill(DB_MIN);
+      lastInputIdRef.current = null;
+      lastOutputIdRef.current = null;
+      lastFrameTimeRef.current = 0;
+    }
+  }, [isActive]);
+
+  const MAIN_H = Math.round(height * 0.68);
+  const DIFF_H = Math.round(height * 0.32);
+
   return (
-    <div className="space-y-2">
-      {/* Waveform Oscilloscope */}
+    <div className="space-y-1">
       <div className="relative">
-        <div className="absolute top-1 left-2 flex gap-3 text-[10px] z-10">
-          <span className="text-blue-400">● Input</span>
-          <span className="text-purple-400">● Output</span>
-        </div>
-        <canvas
-          ref={canvasRef}
-          width={width}
-          height={height}
-          className="w-full rounded-lg border border-gray-700/50"
-          style={{ imageRendering: 'pixelated' }}
-        />
+        <canvas ref={canvasRef}
+          style={{ width: `${width}px`, height: `${MAIN_H}px` }}
+          className="w-full rounded-t-lg border border-gray-700/40" />
         {!isActive && (
-          <div className="absolute inset-0 flex items-center justify-center bg-surface/50 rounded-lg">
-            <p className="text-gray-500 text-sm">스트리밍을 시작하면 파형이 표시됩니다</p>
+          <div className="absolute inset-0 flex items-center justify-center bg-surface/70 rounded-t-lg backdrop-blur-sm">
+            <div className="text-center">
+              <svg className="w-10 h-10 mx-auto text-gray-600 mb-2" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5}
+                  d="M9 19V6l12-3v13M9 19c0 1.105-1.343 2-3 2s-3-.895-3-2 1.343-2 3-2 3 .895 3 2zm12-3c0 1.105-1.343 2-3 2s-3-.895-3-2 1.343-2 3-2 3 .895 3 2zM9 10l12-3" />
+              </svg>
+              <p className="text-gray-500 text-sm">스트리밍 시작 시 실시간 주파수 스펙트럼이 표시됩니다</p>
+              <p className="text-gray-600 text-xs mt-1">~31 Hz (좌) → 4,000 Hz (우) | 8 kHz Sampling</p>
+            </div>
           </div>
         )}
       </div>
-      
-      {/* Spectrogram */}
       <div className="relative">
-        <div className="absolute top-1 left-2 flex gap-3 text-[10px] z-10">
-          <span className="text-blue-400">● Input FFT</span>
-          <span className="text-purple-400">● Output FFT</span>
-        </div>
-        <canvas
-          ref={spectrogramCanvasRef}
-          width={width}
-          height={height / 2}
-          className="w-full rounded-lg border border-gray-700/50"
-          style={{ imageRendering: 'pixelated' }}
-        />
-        <div className="absolute right-2 top-1 bottom-1 flex flex-col justify-between text-[8px] text-gray-500">
-          <span>4kHz</span>
-          <span>0Hz</span>
-        </div>
-      </div>
-      
-      {/* Legend */}
-      <div className="flex justify-between text-[10px] text-gray-500 px-1">
-        <span>← Time</span>
-        <span>스펙트럼 변화로 워터마크 확인</span>
-        <span>Now →</span>
+        <canvas ref={diffCanvasRef}
+          style={{ width: `${width}px`, height: `${DIFF_H}px` }}
+          className="w-full rounded-b-lg border border-t-0 border-gray-700/40" />
+        {!isActive && (
+          <div className="absolute inset-0 flex items-center justify-center bg-surface/70 rounded-b-lg backdrop-blur-sm">
+            <p className="text-gray-600 text-xs">워터마크에 의한 주파수 변화량 (Output - Input)</p>
+          </div>
+        )}
       </div>
     </div>
   );
