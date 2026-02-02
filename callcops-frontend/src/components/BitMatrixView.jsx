@@ -21,7 +21,12 @@ export function BitMatrixView({
   showLabels = true,
   currentBitIndex = -1,
   isProgressive = false,  // Enable playback-synced progressive reveal
-  isPlaying = false       // Whether audio is currently playing
+  isPlaying = false,      // Whether audio is currently playing
+  // Cycle mode props (for synchronized detection)
+  cycleMode = false,
+  cycleBitProbs = null,   // Float32Array(128), -1 = not yet predicted
+  cycleFrame = -1,        // 0-127, current position in cycle
+  cycleCount = 0,         // Which cycle we're in
 }) {
   const [updatedCells, setUpdatedCells] = useState(new Set());
   const prevProbs = useRef(null);
@@ -119,15 +124,27 @@ export function BitMatrixView({
   return (
     <div className="glass rounded-xl p-10">
       <div className="flex items-center justify-between mb-3">
-        <h3 className="text-sm font-semibold text-gray-300">Bit Matrix</h3>
+        <h3 className="text-sm font-semibold text-gray-300 flex items-center gap-2">
+          Bit Matrix
+          {cycleMode && (
+            <span className="px-2 py-0.5 bg-cyan-500/20 text-cyan-400 text-[10px] rounded font-mono">
+              Cycle {cycleCount + 1}
+            </span>
+          )}
+        </h3>
         <div className="flex items-center gap-2">
-          {syncValidity !== null && (
+          {syncValidity !== null && !cycleMode && (
             <span className={`text-xs font-medium px-2 py-0.5 rounded
               ${syncValidity >= 0.9 ? 'bg-green-500/20 text-green-400' :
                 syncValidity >= 0.7 ? 'bg-yellow-500/20 text-yellow-400' :
                   'bg-red-500/20 text-red-400'}
             `}>
               Sync: {(syncValidity * 100).toFixed(0)}%
+            </span>
+          )}
+          {cycleMode && cycleFrame >= 0 && (
+            <span className="text-xs text-gray-500 font-mono">
+              {cycleFrame + 1}/128
             </span>
           )}
           <span className="text-xs text-gray-500">128 bits</span>
@@ -164,14 +181,6 @@ export function BitMatrixView({
         {/* Grid */}
         <div className="flex-grow grid gap-1" style={{ gridTemplateColumns: `repeat(${cols}, 1fr)` }}>
           {Array.from({ length: rows * cols }).map((_, index) => {
-            const prob = bitProbs ? bitProbs[index] : null;
-            const isUpdated = updatedCells.has(index);
-            const isCurrent = index === currentBitIndex;
-
-            // Progressive mode: only show bits that have been "scanned"
-            const isScanned = !isProgressive || currentBitIndex === -1 || index <= currentBitIndex;
-            const showValue = isProgressive ? (isScanned && isPlaying) || currentBitIndex === -1 : true;
-
             const section = getSection(index);
 
             // Border color based on section
@@ -182,6 +191,47 @@ export function BitMatrixView({
               orange: 'border-orange-500/30',
             };
             const borderColor = section ? borderColorMap[section.color] : '';
+
+            // ── Cycle mode: show current cycle's raw predictions ──
+            if (cycleMode && cycleBitProbs) {
+              const cycleProb = cycleBitProbs[index];
+              const isPredicted = cycleProb >= 0 && cycleProb <= 1;  // -1 means not yet
+              const isCycleCurrent = index === cycleFrame;
+
+              const cellColor = isPredicted ? getCellColor(cycleProb) : '#374151';
+              const textColor = isPredicted ? getTextColor(cycleProb) : '#6b7280';
+              const cellValue = isPredicted ? (cycleProb > 0.5 ? '1' : '0') : '?';
+
+              return (
+                <div
+                  key={index}
+                  className={`
+                  aspect-square rounded-sm flex items-center justify-center
+                  text-[8px] font-mono font-bold border
+                  transition-all duration-100
+                  ${isCycleCurrent ? 'ring-2 ring-cyan-400 ring-offset-1 ring-offset-transparent z-10 animate-pulse' : ''}
+                  ${!isPredicted ? 'opacity-30' : 'shadow-sm'}
+                  ${borderColor}
+                `}
+                  style={{
+                    backgroundColor: cellColor,
+                    color: textColor,
+                  }}
+                  title={`[${section?.name}] Bit ${index}: ${isPredicted ? (cycleProb * 100).toFixed(1) + '%' : 'Pending'}`}
+                >
+                  {showLabels ? cellValue : ''}
+                </div>
+              );
+            }
+
+            // ── Normal mode ──
+            const prob = bitProbs ? bitProbs[index] : null;
+            const isUpdated = updatedCells.has(index);
+            const isCurrent = index === currentBitIndex;
+
+            // Progressive mode: only show bits that have been "scanned"
+            const isScanned = !isProgressive || currentBitIndex === -1 || index <= currentBitIndex;
+            const showValue = isProgressive ? (isScanned && isPlaying) || currentBitIndex === -1 : true;
 
             // In progressive mode, unscanned bits show gray
             const cellColor = isProgressive && !isScanned && isPlaying
