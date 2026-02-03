@@ -506,6 +506,16 @@ def train(
             use_discriminator=True
         ).to(device)
 
+        # ========================================
+        # 1.5 Encoder Alpha Override (Config에서 강제 적용)
+        # ========================================
+        encoder_alpha = training_config.get('encoder_alpha', None)
+        if encoder_alpha is not None:
+            old_alpha = model.encoder.alpha.item()
+            model.encoder.alpha.fill_(encoder_alpha)
+            model.encoder.alpha_min = encoder_alpha
+            print(f"⚠️ Encoder Alpha Override: {old_alpha:.3f} → {encoder_alpha:.3f}")
+
         # 파라미터 수 출력
         params = model.count_parameters()
         print(f"\nModel Parameters:")
@@ -597,11 +607,30 @@ def train(
             trainer.load_checkpoint(resume_path, new_lr=lr)  # 중요: config LR 강제 적용
             messenger.send_message(f"🔄 **Resumed Training** from epoch {trainer.current_epoch}\n📊 LR Override: `{lr:.2e}`")
 
+            # 체크포인트 로드 후 Alpha 재강제 (체크포인트가 이전 alpha를 복원할 수 있음)
+            if encoder_alpha is not None:
+                model.encoder.alpha.fill_(encoder_alpha)
+                model.encoder.alpha_min = encoder_alpha
+                print(f"⚠️ Post-Checkpoint Alpha Re-enforced: {encoder_alpha:.3f}")
+
         # ========================================
         # 6. Training Loop
         # ========================================
         num_epochs = training_config.get('epochs', 100)
         save_dir.mkdir(parents=True, exist_ok=True)
+
+        # ========================================
+        # Early Stopping Setup (SNR 기반)
+        # ========================================
+        es_config = training_config.get('early_stopping', {})
+        es_enabled = es_config.get('enabled', False)
+        es_min_snr = es_config.get('min_snr', 15.0)
+        es_patience = es_config.get('patience', 10)
+        es_counter = 0  # 연속으로 SNR < min_snr인 에포크 수
+        best_val_snr = 0.0
+
+        if es_enabled:
+            print(f"\n⚡ Early Stopping ENABLED: monitor=val_snr, min_snr={es_min_snr}dB, patience={es_patience}")
 
         print("\n" + "=" * 60)
         print("CallCops Training Started")
@@ -647,6 +676,40 @@ def train(
                 old_lambda_audio = loss_fn.lambda_audio
                 loss_fn.lambda_audio = min(500.0, loss_fn.lambda_audio * 1.1)
                 print(f"  🎛️ Dynamic: lambda_audio {old_lambda_audio:.1f} → {loss_fn.lambda_audio:.1f} (SNR too low)")
+
+            # ========================================
+            # Early Stopping Check (SNR 기반)
+            # ========================================
+            if es_enabled:
+                current_snr = val_metrics['snr']
+
+                if current_snr < es_min_snr:
+                    es_counter += 1
+                    print(f"  ⚠️ Early Stop Warning: Val SNR={current_snr:.1f}dB < {es_min_snr}dB "
+                          f"({es_counter}/{es_patience})")
+                else:
+                    if es_counter > 0:
+                        print(f"  ✅ SNR recovered to {current_snr:.1f}dB, resetting early stop counter")
+                    es_counter = 0
+
+                if es_counter >= es_patience:
+                    stop_msg = (
+                        f"🛑 **Early Stopping Triggered!**\n"
+                        f"Val SNR < {es_min_snr}dB for {es_patience} consecutive epochs.\n"
+                        f"Last SNR: {current_snr:.1f}dB | Best SNR: {best_val_snr:.1f}dB\n"
+                        f"BER at stop: {val_metrics['ber']:.4f}"
+                    )
+                    print(f"\n{stop_msg}")
+                    if messenger:
+                        messenger.send_message(stop_msg)
+
+                    # 종료 전 최종 체크포인트 저장
+                    trainer.save_checkpoint(
+                        save_dir / f"early_stop_epoch{epoch+1}.pth",
+                        val_metrics,
+                        config
+                    )
+                    break
 
             # Summary
             summary_text = (
@@ -699,6 +762,18 @@ def train(
                     config
                 )
                 print(f"  ★ New best Loss model! Loss: {trainer.best_loss:.4f}")
+
+            # 3. Best SNR Model (SNR Rescue 시 가장 중요한 지표)
+            if val_metrics['snr'] > best_val_snr:
+                best_val_snr = val_metrics['snr']
+                trainer.save_checkpoint(
+                    save_dir / "best_snr_model.pth",
+                    val_metrics,
+                    config
+                )
+                print(f"  ★ New best SNR model! SNR: {best_val_snr:.1f}dB (BER: {val_metrics['ber']:.4f})")
+                if messenger:
+                    messenger.send_message(f"📡 **New Best SNR!** `{best_val_snr:.1f}dB` (BER: `{val_metrics['ber']:.4f}`)")
 
             # 주기적 영구 저장 (10 에포크마다 별도 파일로 남김)
             if (epoch + 1) % 10 == 0:

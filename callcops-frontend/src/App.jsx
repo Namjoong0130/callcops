@@ -316,7 +316,12 @@ function MainApp() {
   };
 
   // Handle verify (switch to detect mode and run decoder)
-  const handleVerify = async (audioData) => {
+  // Optional embeddedMessage param: the original unrotated message used during embedding
+  // (passed by RealtimeEmbedDemo to override the rotated messages set during streaming)
+  const handleVerify = async (audioData, embeddedMessage) => {
+    if (embeddedMessage) {
+      setOriginalMessage(embeddedMessage);
+    }
     setAppMode('detect');
 
     // Small delay to allow UI update

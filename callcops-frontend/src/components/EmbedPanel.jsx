@@ -190,7 +190,7 @@ export function EmbedPanel({
   return (
     <div className="space-y-6">
       {/* Real-Time Demo */}
-      <RealtimeEmbedDemo onEmbed={onEmbed} isModelReady={isModelReady} />
+      <RealtimeEmbedDemo onEmbed={onEmbed} isModelReady={isModelReady} externalMessage={message} onVerify={onVerify} />
       
       {/* Divider */}
       <div className="flex items-center gap-3">

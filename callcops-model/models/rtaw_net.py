@@ -415,14 +415,13 @@ class Encoder(nn.Module):
 
         self.output_conv = nn.Conv1d(hidden_channels[0], 1, kernel_size=7, padding=3)
 
-        # [cite_start]논문 사양: alpha는 [0.3, 1.0] 범위 사용
-        # Quality-Centric: alpha=0.3으로 낮춰 SNR 우선
-        self.alpha_min = 0.3
-        self.alpha_max = 1.0
-        
-        # Quality-Centric 모드: alpha=0.3 (투명성 최우선)
+        # SNR Rescue Mode: alpha=0.25 (물리적 섭동 강도 제한)
+        # 기존 0.3에서 0.25로 낮춰 워터마크 에너지 상한 감소
         # BER은 BCH(511,128)가 10%까지 허용하므로 SNR에 집중
-        self.register_buffer('alpha', torch.tensor(0.3))
+        self.alpha_min = 0.25
+        self.alpha_max = 1.0
+
+        self.register_buffer('alpha', torch.tensor(0.25))
 
     def train(self, mode: bool = True):
         super().train(mode)

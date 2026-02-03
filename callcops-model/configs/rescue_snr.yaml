@@ -1,0 +1,107 @@
+# CallCops: SNR Rescue Configuration
+# ====================================
+# 목표: "Destructive Convergence" 탈출
+# 상황: BER=1.5% (과도하게 낮음), SNR=1.5dB (치명적), Val Loss 상승
+# 전략: BER을 BCH 허용 범위(10%)까지 희생하고 SNR > 20dB 회복
+#
+# 사용법:
+#   python scripts/train.py \
+#     --config configs/rescue_snr.yaml \
+#     --resume checkpoints/checkpoint_epoch5.pth \
+#     --epochs 50
+#
+# ⚠️ 주의: Epoch 5 체크포인트가 로컬에 없으면 가장 최근 안정 체크포인트 사용
+#   예: --resume checkpoints/checkpoint_epoch2.pth
+
+# 오디오 규격 (변경 없음)
+audio:
+  sample_rate: 8000
+  bit_depth: 16
+  channels: 1
+  frame_ms: 40
+  frame_samples: 320
+
+# 워터마크 페이로드 (변경 없음)
+watermark:
+  bits_per_frame: 1
+  payload_length: 128
+  sync_pattern: "1010101010101010"
+
+# 모델 아키텍처 (변경 없음)
+model:
+  encoder:
+    channels: [32, 64, 128, 256]
+    kernel_size: 7
+    dilation_base: 2
+    num_layers: 8
+    attention_heads: 4
+
+  decoder:
+    channels: [256, 128, 64, 32]
+    kernel_size: 5
+
+  discriminator:
+    resolutions: [64, 128, 256]
+    channels: [32, 64, 128, 256]
+
+# 학습 설정 (SNR Rescue Mode)
+training:
+  batch_size: 24
+  learning_rate: 0.000001   # 1e-6 (극도로 안정적)
+  num_workers: 4
+  adam_betas: [0.5, 0.9]
+  epochs: 50
+  grad_clip: 0.3             # 0.5 → 0.3 (더 엄격한 gradient clipping)
+  use_amp: true
+
+  # ═══════════════════════════════════════════════════
+  # 손실 함수 가중치 (Aggressive Audio-Priority Rebalancing)
+  # ═══════════════════════════════════════════════════
+  # 핵심 철학: "비트를 소리치지 말고, 지각적 틈새에 숨겨라"
+  #
+  # lambda_bit:   0.1  (1.0 → 0.1)  — BER 압박 거의 제거
+  # lambda_audio: 350  (200 → 350)  — Mel Loss 최우선
+  # lambda_l1:    500  (50 → 500)   — Waveform 직접 보존 극대화
+  # lambda_stft:  30   (유지)       — 스펙트럼 보존
+  # ═══════════════════════════════════════════════════
+  lambda_bit: 0.1             # 비트 임베딩 압박 최소화
+  lambda_audio: 350.0         # Mel Loss (지각적 품질) 최우선
+  lambda_stft: 30.0           # 스펙트럼 보존 유지
+  lambda_l1: 500.0            # L1 Waveform Loss 극대화 → SNR 직접 최적화
+  lambda_adv: 0.05            # GAN 유지
+  lambda_det: 0.1             # Detection 유지
+
+  # ═══════════════════════════════════════════════════
+  # Early Stopping (SNR 기반)
+  # ═══════════════════════════════════════════════════
+  early_stopping:
+    enabled: true
+    monitor: "val_snr"         # Val SNR 기반 모니터링
+    min_snr: 15.0              # 15dB 미만이면 카운트
+    patience: 10               # 10 에포크 연속 15dB 미만 → 종료
+    # BER이 0이어도 SNR < 15dB이면 의미 없음
+
+  # Encoder Alpha Override
+  # rtaw_net.py에서도 변경하지만, config에서도 명시
+  encoder_alpha: 0.25          # 0.3 → 0.25 (물리적 강도 제한)
+
+# 코덱 시뮬레이터
+codec:
+  enabled: true
+  types: ["g711_alaw", "g711_ulaw", "g729", "amr_nb", "none"]
+  g711_bits: 8
+  g729_bitrate: 8000
+
+# 데이터 증강
+augmentation:
+  noise_snr_range: [15, 40]
+  bandpass_low: 300
+  bandpass_high: 3400
+  codec_prob: 0.7
+
+# 품질 목표
+quality_targets:
+  pesq_min: 4.0
+  ber_max: 0.10               # BCH(511,128) 허용 범위
+  snr_min: 20.0               # 핵심 목표: SNR > 20dB 회복
+  latency_max_ms: 200
