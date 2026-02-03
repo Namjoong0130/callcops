@@ -11,6 +11,7 @@ import { verifyCRC, attemptCorrection } from '../utils/crc';
 import { Audio } from 'expo-av';
 import { LinearGradient } from 'expo-linear-gradient';
 import { Ionicons } from '@expo/vector-icons';
+import { BANK_AUTH_KEYS, BANK_LIST, getBankByKey } from '../constants/bankAuthKeys';
 
 const SAMPLE_RATE = 8000;
 const FRAME_SIZE = 320;
@@ -42,6 +43,9 @@ export default function ReceiverMode({ onBack }) {
     const timerRef = useRef(null);
     const [errorMessage, setErrorMessage] = useState(null);
     const [usedOnnx, setUsedOnnx] = useState(false);
+    const [detectedBank, setDetectedBank] = useState(null); // Identified bank object
+    const [extractedAuthKey, setExtractedAuthKey] = useState(null); // Raw auth key string (Hex)
+    const [isSpeakerOn, setIsSpeakerOn] = useState(false);
 
     // Streaming state refs
     const accumulatorsRef = useRef(new Float32Array(PAYLOAD_LENGTH).fill(0));
@@ -366,7 +370,10 @@ export default function ReceiverMode({ onBack }) {
             }
 
             // Play Audio
-            const { sound } = await Audio.Sound.createAsync({ uri: fileUri });
+            const { sound } = await Audio.Sound.createAsync(
+                { uri: fileUri },
+                { volume: isSpeakerOn ? 1.0 : 0.2 } // Use current speaker state
+            );
             soundRef.current = sound;
             await sound.playAsync();
 
@@ -464,6 +471,27 @@ export default function ReceiverMode({ onBack }) {
             // Real-time Validity Check
             const rtResult = verifyCRC(runningProbs);
             setRealtimeValid(rtResult.isValid);
+
+            // Real-time Bank Identification
+            if (rtResult.isValid) {
+                try {
+                    let authKey = BigInt(0);
+                    for (let i = 0; i < 64; i++) {
+                        const bitVal = runningProbs[48 + i] > 0.5 ? 1n : 0n;
+                        authKey |= (bitVal << BigInt(63 - i));
+                    }
+                    const bank = getBankByKey(authKey);
+                    if (bank && detectedBank?.id !== bank.id) {
+                        setDetectedBank(bank);
+                        setExtractedAuthKey('0x' + authKey.toString(16).toUpperCase().padStart(16, '0'));
+                    }
+                } catch (e) {
+                    console.warn('RT Bank extraction failed:', e);
+                }
+            } else {
+                // If CRC fails in RT, we might want to keep the last detected bank 
+                // or clear it. Let's keep it for stability unless it's definitely spoofed.
+            }
 
             // Progress
             const progressRaw = (end / totalLen) * 100;
@@ -578,6 +606,31 @@ export default function ReceiverMode({ onBack }) {
         // Logic Update: If CRC passes, it IS valid regardless of confidence
         // CRC is a strong mathematical proof of integrity
         setIsValid(crcPassed);
+
+        // Extract Bank Auth Code (Bits 48-111)
+        if (crcPassed) {
+            try {
+                // Reconstruct 64-bit BigInt from bits 48-111
+                let authKey = BigInt(0);
+                for (let i = 0; i < 64; i++) {
+                    const bitVal = usedProbs[48 + i] > 0.5 ? 1n : 0n;
+                    authKey |= (bitVal << BigInt(63 - i));
+                }
+
+                const bank = getBankByKey(authKey);
+                console.log('Extracted Auth Key:', authKey.toString(16), 'Bank:', bank ? bank.name : 'Unknown');
+                setDetectedBank(bank);
+                setExtractedAuthKey('0x' + authKey.toString(16).toUpperCase().padStart(16, '0'));
+            } catch (e) {
+                console.warn('Bank extraction failed:', e);
+                setDetectedBank(null);
+                setExtractedAuthKey(null);
+            }
+        } else {
+            setDetectedBank(null);
+            setExtractedAuthKey(null);
+        }
+
         setState('result');
     };
 
@@ -603,6 +656,19 @@ export default function ReceiverMode({ onBack }) {
         setActiveIndices(new Set());
         setErrorMessage(null);
         setUsedOnnx(false);
+        setDetectedBank(null);
+        setExtractedAuthKey(null);
+        setIsSpeakerOn(false); // Reset speaker
+        onBack(); // Exit to main menu
+    };
+
+    const toggleSpeaker = async () => {
+        const nextState = !isSpeakerOn;
+        setIsSpeakerOn(nextState);
+        if (soundRef.current) {
+            // Speaker on -> 1.0 (Full), Speaker off -> 0.2 (Earpiece imitation)
+            await soundRef.current.setVolumeAsync(nextState ? 1.0 : 0.2);
+        }
     };
 
     // Render Dual Bit Grids
@@ -879,7 +945,7 @@ export default function ReceiverMode({ onBack }) {
                 </TouchableOpacity>
 
                 <View style={[styles.centerContent, { justifyContent: 'flex-start', paddingTop: 130 }]}>
-                    <Text style={styles.callerName}>070-7079-5431</Text>
+                    <Text style={styles.callerName}>070-4768-5582</Text>
                     <Text style={styles.callerNumber}>대한민국</Text>
                 </View>
 
@@ -948,7 +1014,12 @@ export default function ReceiverMode({ onBack }) {
         const topButtons = [
             { iconName: 'mic-off', label: '소리 끔' },
             { iconName: 'keypad', label: '키패드' },
-            { iconName: 'volume-high', label: '스피커' },
+            {
+                iconName: 'volume-high',
+                label: '스피커',
+                onPress: toggleSpeaker,
+                highlight: isSpeakerOn
+            },
         ];
         const bottomButtons = [
             { iconName: 'shield-checkmark', label: 'Callcops', onPress: () => setShowSecurity(true), highlight: true },
@@ -971,12 +1042,17 @@ export default function ReceiverMode({ onBack }) {
 
                 {/* Header Info */}
                 <View style={styles.iphoneHeaderV2}>
-                    <Text style={styles.iphoneCallerNameV2}>Jane님 및 Armando</Text>
+                    <Text style={styles.iphoneCallerNameV2}>070-4768-5582</Text>
                     <View style={[styles.persistentBadge, realtimeValid ? styles.badgeVerified : styles.badgeSpoofed]}>
                         <Text style={styles.persistentBadgeText}>
                             {realtimeValid ? 'AUTHENTICATED' : 'SPOOFING SUSPECTED'}
                         </Text>
                     </View>
+                    {realtimeValid && detectedBank && (
+                        <Text style={[styles.rtBankText, { color: detectedBank.color }]}>
+                            {detectedBank.name}
+                        </Text>
+                    )}
                     <Text style={styles.iphoneTimerV2}>{formatDuration(callDuration)}</Text>
                 </View>
 
@@ -1026,12 +1102,25 @@ export default function ReceiverMode({ onBack }) {
                         <View style={styles.iphoneGridV2}>
                             <View style={styles.iphoneGridRow}>
                                 {topButtons.map((btn, i) => (
-                                    <View key={i} style={styles.iphoneGridItemV2}>
-                                        <View style={[styles.iphoneCircleButtonV2, i === 2 && styles.activeSpeaker]}>
-                                            <Ionicons name={btn.iconName} size={32} color={i === 2 ? '#000' : '#fff'} />
+                                    <TouchableOpacity
+                                        key={i}
+                                        style={styles.iphoneGridItemV2}
+                                        onPress={btn.onPress}
+                                        disabled={!btn.onPress}
+                                        activeOpacity={0.7}
+                                    >
+                                        <View style={[
+                                            styles.iphoneCircleButtonV2,
+                                            btn.highlight && styles.activeSpeaker
+                                        ]}>
+                                            <Ionicons
+                                                name={btn.iconName}
+                                                size={32}
+                                                color={btn.highlight ? '#000' : '#fff'}
+                                            />
                                         </View>
                                         <Text style={styles.iphoneButtonLabelV2}>{btn.label}</Text>
-                                    </View>
+                                    </TouchableOpacity>
                                 ))}
                             </View>
                             <View style={styles.iphoneGridRow}>
@@ -1092,12 +1181,32 @@ export default function ReceiverMode({ onBack }) {
                             </View>
 
                             <Text style={[styles.resultTitle, isValid ? styles.validText : styles.invalidText]}>
-                                {isValid ? 'Verified Caller' : 'Potential Spoofing'}
+                                {isValid ? 'VERIFIED' : 'Potential Spoofing'}
                             </Text>
 
-                            <Text style={styles.subtitle}>
-                                {isValid ? '인증된 발신자입니다' : '발신자 인증에 실패했습니다'}
+                            <Text style={[styles.subtitle, isValid && { color: '#9ca3af' }]}>
+                                {isValid ? '인증된 사용자입니다.' : '발신자 인증에 실패했습니다'}
                             </Text>
+
+                            {/* Detected Bank & Auth Key Info */}
+                            {(detectedBank || extractedAuthKey) && (
+                                <View style={styles.authResultContainer}>
+                                    {detectedBank && (
+                                        <View style={[styles.bankBadge, { borderColor: detectedBank.color, backgroundColor: `${detectedBank.color}20`, marginTop: 8 }]}>
+                                            <Text style={[styles.bankName, { color: detectedBank.color }]}>
+                                                {detectedBank.name}
+                                            </Text>
+                                        </View>
+                                    )}
+
+                                    {extractedAuthKey && (
+                                        <View style={styles.authKeyResultBox}>
+                                            <Text style={styles.authKeyResultLabel}>AUTH KEY</Text>
+                                            <Text style={styles.authKeyResultValue}>{extractedAuthKey}</Text>
+                                        </View>
+                                    )}
+                                </View>
+                            )}
 
                             {/* Method Badge */}
 
@@ -1324,7 +1433,7 @@ const styles = StyleSheet.create({
         fontSize: 14,
         color: '#9ca3af',
         textAlign: 'center',
-        marginBottom: 24,
+        marginBottom: 12, // Reduced margin
     },
     progressContainer: {
         width: '80%',
@@ -1386,9 +1495,9 @@ const styles = StyleSheet.create({
         color: '#fff',
     },
     resultTitle: {
-        fontSize: 24,
+        fontSize: 32,
         fontWeight: 'bold',
-        marginBottom: 8,
+        marginBottom: 4,
     },
     validText: {
         color: '#22c55e',
@@ -1672,6 +1781,13 @@ const styles = StyleSheet.create({
         fontSize: 10,
         fontWeight: 'bold',
         letterSpacing: 1,
+    },
+    rtBankText: {
+        fontSize: 14,
+        fontWeight: 'bold',
+        marginBottom: 8,
+        textTransform: 'uppercase',
+        letterSpacing: 0.5,
     },
     iphoneCallerNameV2: {
         color: '#fff',
@@ -1990,5 +2106,52 @@ const styles = StyleSheet.create({
     endCallIconV2: {
         fontSize: 38,
         color: '#fff',
+    },
+    // Bank Result Styles
+    bankBadge: {
+        flexDirection: 'row',
+        alignItems: 'center',
+        paddingHorizontal: 16,
+        paddingVertical: 8,
+        borderRadius: 20,
+        borderWidth: 1,
+        marginTop: 16,
+        gap: 8,
+    },
+    bankName: {
+        fontSize: 16,
+        fontWeight: 'bold',
+    },
+    bankLabel: {
+        color: '#9ca3af',
+        fontSize: 14,
+    },
+    authResultContainer: {
+        width: '100%',
+        alignItems: 'center',
+        marginTop: 16,
+        gap: 12,
+    },
+    authKeyResultBox: {
+        padding: 12,
+        backgroundColor: 'rgba(31, 41, 55, 0.5)',
+        borderRadius: 8,
+        borderWidth: 1,
+        borderColor: '#374151',
+        borderStyle: 'dashed',
+        alignItems: 'center',
+        width: '100%',
+    },
+    authKeyResultLabel: {
+        fontSize: 10,
+        color: '#9ca3af',
+        marginBottom: 4,
+        fontWeight: 'bold',
+    },
+    authKeyResultValue: {
+        fontSize: 14,
+        color: '#e5e7eb',
+        fontFamily: 'monospace',
+        fontWeight: 'bold',
     },
 });

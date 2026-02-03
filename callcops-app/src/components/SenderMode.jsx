@@ -22,6 +22,7 @@ import {
   FRAME_SAMPLES,
   PAYLOAD_LENGTH
 } from '../utils/StreamingEncoderWrapper';
+import { BANK_AUTH_KEYS, BANK_LIST, getBankById } from '../constants/bankAuthKeys';
 
 // Audio settings - Native 8kHz capture, NO resampling
 const SAMPLE_RATE = 8000;
@@ -37,6 +38,7 @@ export default function SenderMode({ onBack }) {
   const [encodedUri, setEncodedUri] = useState(null);
   const [permissionGranted, setPermissionGranted] = useState(false);
   const [usedOnnx, setUsedOnnx] = useState(false);
+  const [selectedBank, setSelectedBank] = useState('KB'); // Default to KB국민은행
 
   // Real-time visualization state
   const [inputWaveform, setInputWaveform] = useState(new Array(30).fill(0));
@@ -118,7 +120,9 @@ export default function SenderMode({ onBack }) {
     const now = Math.floor(Date.now() / 1000);
     const syncPattern = 0xAAAA;
     const timestamp = now & 0xFFFFFFFF;
-    const authCode = BigInt(Math.floor(Math.random() * 0xFFFFFFFFFFFFFFFF));
+    // Use selected bank's auth key instead of random
+    const bank = getBankById(selectedBank);
+    const authCode = bank ? bank.key : BigInt('0x0000000000000000');
     const messageBits = [];
 
     for (let i = 15; i >= 0; i--) messageBits.push((syncPattern >> i) & 1);
@@ -493,6 +497,44 @@ export default function SenderMode({ onBack }) {
           <Text style={styles.title}>Ready to Call</Text>
           <Text style={styles.subtitle}>8kHz real-time audio (40ms frames)</Text>
 
+          {/* Bank Selection Container */}
+          <View style={styles.bankSelectionContainer}>
+            <Text style={styles.bankLabel}>발신 은행 선택</Text>
+            <View style={styles.bankSelector}>
+              {BANK_LIST.map((bank) => (
+                <TouchableOpacity
+                  key={bank.id}
+                  onPress={() => setSelectedBank(bank.id)}
+                  style={[
+                    styles.bankOption,
+                    selectedBank === bank.id && styles.bankOptionSelected,
+                    { borderColor: bank.color }
+                  ]}
+                >
+                  <Text style={[
+                    styles.bankOptionText,
+                    selectedBank === bank.id && { color: bank.color, fontWeight: 'bold' }
+                  ]}>
+                    {bank.name}
+                  </Text>
+                </TouchableOpacity>
+              ))}
+            </View>
+
+            {/* Selected Bank Auth Code */}
+            {selectedBank && (
+              <View style={styles.authCodeContainer}>
+                <Text style={styles.authCodeLabel}>Secure Banking Auth Code</Text>
+                <Text style={styles.authCodeValue}>
+                  0x{getBankById(selectedBank)?.key.toString(16).toUpperCase().padStart(16, '0')}
+                </Text>
+              </View>
+            )}
+          </View>
+        </View>
+
+        {/* Status Messages Area (Above Call Button) */}
+        <View style={styles.bottomStatusContainer}>
           {!permissionGranted && (
             <View style={styles.errorBox}>
               <Text style={styles.errorText}>Microphone permission required</Text>
@@ -960,5 +1002,80 @@ const styles = StyleSheet.create({
   resetText: {
     color: '#9ca3af',
     fontSize: 16,
+  },
+  // Bank Selection Styles
+  bankSelectionContainer: {
+    marginTop: 24,
+    width: '105%', // Slightly wider as requested
+    backgroundColor: 'rgba(255, 255, 255, 0.9)', // High visibility white box
+    borderRadius: 16,
+    padding: 16,
+    alignItems: 'center',
+  },
+  bankLabel: {
+    color: '#1f2937', // Dark text for white background
+    fontSize: 14,
+    fontWeight: '600',
+    marginBottom: 12,
+  },
+  bankSelector: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    justifyContent: 'center',
+    gap: 8,
+  },
+  bankOption: {
+    paddingHorizontal: 12,
+    paddingVertical: 8,
+    borderRadius: 20,
+    borderWidth: 1,
+    backgroundColor: '#fff',
+    elevation: 1,
+    shadowColor: "#000",
+    shadowOffset: { width: 0, height: 1 },
+    shadowOpacity: 0.1,
+    shadowRadius: 1,
+  },
+  bankOptionSelected: {
+    backgroundColor: '#eff6ff', // Light blue tint when selected
+    borderWidth: 2,
+    elevation: 2,
+  },
+  bankOptionText: {
+    color: '#4b5563',
+    fontSize: 12,
+    fontWeight: '500',
+  },
+  // Auth Code Display
+  authCodeContainer: {
+    marginTop: 16,
+    width: '100%',
+    backgroundColor: '#f3f4f6',
+    borderRadius: 8,
+    padding: 10,
+    alignItems: 'center',
+    borderWidth: 1,
+    borderStyle: 'dashed',
+    borderColor: '#d1d5db',
+  },
+  authCodeLabel: {
+    fontSize: 10,
+    color: '#6b7280',
+    marginBottom: 2,
+    textTransform: 'uppercase',
+  },
+  authCodeValue: {
+    fontSize: 14,
+    fontFamily: 'monospace',
+    fontWeight: 'bold',
+    color: '#374151',
+  },
+  // Bottom Status Area
+  bottomStatusContainer: {
+    position: 'absolute',
+    bottom: 200, // Moved up significantly
+    width: '100%',
+    alignItems: 'center',
+    paddingHorizontal: 20,
   },
 });
