@@ -3,16 +3,19 @@
  *
  * Real-time watermark embedding using StreamingEncoderWrapper.
  *
+ * Architecture: Queue-based sequential processing
+ * ─────────────────────────────────────────────────
+ * - ScriptProcessor captures audio chunks synchronously
+ * - Chunks are pushed to a queue (no data loss)
+ * - A single processing loop drains the queue sequentially
+ * - No race conditions: only one frame processes at a time
+ *
  * Processing pipeline:
- * - ScriptProcessor captures 2048-sample buffers (256ms @ 8kHz)
- * - Samples accumulate in a ref buffer
- * - tryProcessNext() processes one 320-sample frame via wrapper.processFrame()
- * - The wrapper manages a rolling history buffer (5 frames = 1600 samples)
- *   and feeds [history + frame] = 1920 samples to the ONNX encoder,
- *   extracting only the last 320 watermarked samples
- * - Global bit indexing is handled internally by the wrapper via message rotation
- * - After each frame, chains to itself to process the next immediately
- * - On stop, remaining accumulated samples are drained frame-by-frame
+ * - ScriptProcessor captures 2048-sample buffers @ 8kHz
+ * - Audio samples are pushed to inputQueue
+ * - processLoop() consumes 320-sample frames from the queue
+ * - The wrapper handles history buffer (1920 samples → 320 output)
+ * - Watermarked frames are stored for final export
  */
 
 import { useState, useCallback, useRef, useEffect } from 'react';
@@ -22,6 +25,7 @@ import { RealtimeOscilloscope } from './RealtimeOscilloscope';
 const SAMPLE_RATE = 8000;
 const FRAME_SAMPLES = 320;       // 40ms @ 8kHz — model's atomic unit (1 bit per frame)
 const PAYLOAD_LENGTH = 128;      // 128-bit cyclic payload
+const VIS_BUFFER_SIZE = 2048;    // Visualization buffer size
 
 export function RealtimeEmbedDemo({ onEmbed, createStreamingEncoder, isModelReady = false, externalMessage = null, onVerify }) {
   const [isStreaming, setIsStreaming] = useState(false);
@@ -37,20 +41,30 @@ export function RealtimeEmbedDemo({ onEmbed, createStreamingEncoder, isModelRead
   });
 
   // Buffers for frequency spectrum visualization
-  const [inputBuffer, setInputBuffer] = useState(new Float32Array(2048));
-  const [outputBuffer, setOutputBuffer] = useState(new Float32Array(2048));
+  const [inputBuffer, setInputBuffer] = useState(new Float32Array(VIS_BUFFER_SIZE));
+  const [outputBuffer, setOutputBuffer] = useState(new Float32Array(VIS_BUFFER_SIZE));
 
+  // Audio capture refs
   const mediaStreamRef = useRef(null);
   const audioContextRef = useRef(null);
   const processorRef = useRef(null);
   const sourceRef = useRef(null);
-  const latenciesRef = useRef([]);
-  const isStreamingRef = useRef(false);
-  const isProcessingRef = useRef(false);
 
-  const accumulatedSamplesRef = useRef(new Float32Array(0));
-  const watermarkedChunksRef = useRef([]);
+  // Processing state refs
+  const isStreamingRef = useRef(false);
+  const isProcessingRef = useRef(false);  // Mutex for processing loop
+  const stopRequestedRef = useRef(false); // Signal to stop processing loop
+  const latenciesRef = useRef([]);
+
+  // Queue-based buffer management (prevents race conditions)
+  const inputQueueRef = useRef([]);             // Queue of raw audio chunks
+  const pendingBufferRef = useRef(new Float32Array(0));  // Partial frame buffer
+  const watermarkedChunksRef = useRef([]);      // Output chunks for final export
   const messageRef = useRef(null);
+
+  // Rolling visualization buffers (continuous update)
+  const visInputRef = useRef(new Float32Array(VIS_BUFFER_SIZE));
+  const visOutputRef = useRef(new Float32Array(VIS_BUFFER_SIZE));
 
   // Streaming wrapper ref — holds the StreamingEncoderWrapper instance
   const streamingWrapperRef = useRef(null);
@@ -64,6 +78,92 @@ export function RealtimeEmbedDemo({ onEmbed, createStreamingEncoder, isModelRead
     setMessage(msg);
     return msg;
   }, []);
+
+  // Update visualization buffers (rolling window)
+  const updateVisualization = useCallback((inputFrame, outputFrame) => {
+    // Shift left and append new samples
+    const shiftAmount = inputFrame.length;
+    
+    // Input visualization
+    visInputRef.current.copyWithin(0, shiftAmount);
+    visInputRef.current.set(inputFrame, VIS_BUFFER_SIZE - shiftAmount);
+    
+    // Output visualization  
+    visOutputRef.current.copyWithin(0, shiftAmount);
+    visOutputRef.current.set(outputFrame, VIS_BUFFER_SIZE - shiftAmount);
+    
+    // Batch update React state (creates new array refs for FFT cache invalidation)
+    setInputBuffer(visInputRef.current.slice());
+    setOutputBuffer(visOutputRef.current.slice());
+  }, []);
+
+  /**
+   * Sequential processing loop.
+   * 
+   * This function processes frames one at a time from the queue.
+   * It uses a mutex (isProcessingRef) to ensure only one instance runs.
+   * New audio chunks are pushed to inputQueueRef by onaudioprocess.
+   */
+  const processLoop = useCallback(async () => {
+    // Mutex: only one loop instance at a time
+    if (isProcessingRef.current) return;
+    isProcessingRef.current = true;
+
+    const wrapper = streamingWrapperRef.current;
+    const msg = messageRef.current;
+
+    try {
+      while (!stopRequestedRef.current) {
+        // 1. Drain queue into pending buffer
+        while (inputQueueRef.current.length > 0) {
+          const chunk = inputQueueRef.current.shift();
+          const prev = pendingBufferRef.current;
+          const combined = new Float32Array(prev.length + chunk.length);
+          combined.set(prev);
+          combined.set(chunk, prev.length);
+          pendingBufferRef.current = combined;
+        }
+
+        // 2. Process complete frames
+        if (pendingBufferRef.current.length < FRAME_SAMPLES) {
+          // Not enough samples yet — yield and wait
+          await new Promise(r => setTimeout(r, 5));
+          continue;
+        }
+
+        // Extract one frame
+        const frame = pendingBufferRef.current.slice(0, FRAME_SAMPLES);
+        pendingBufferRef.current = pendingBufferRef.current.slice(FRAME_SAMPLES);
+
+        // 3. Process frame through encoder
+        const startTime = performance.now();
+        const watermarkedFrame = await wrapper.processFrame(frame, msg);
+        const latency = performance.now() - startTime;
+
+        // 4. Store watermarked output
+        watermarkedChunksRef.current.push(watermarkedFrame);
+
+        // 5. Update latency stats
+        latenciesRef.current.push(latency);
+        if (latenciesRef.current.length > 50) latenciesRef.current.shift();
+        const avgLatency = latenciesRef.current.reduce((a, b) => a + b, 0) / latenciesRef.current.length;
+
+        setStats(prev => ({
+          latencyMs: latency.toFixed(1),
+          chunksProcessed: prev.chunksProcessed + 1,
+          totalSamples: prev.totalSamples + FRAME_SAMPLES,
+          avgLatency: avgLatency.toFixed(1)
+        }));
+
+        // 6. Update visualization
+        updateVisualization(frame, watermarkedFrame);
+      }
+    } catch (err) {
+      console.error('Processing loop error:', err);
+    } finally {
+      isProcessingRef.current = false;
+    }
+  }, [updateVisualization]);
 
   // WAV encoding helper
   const encodeWav = useCallback((audioData) => {
@@ -118,9 +218,13 @@ export function RealtimeEmbedDemo({ onEmbed, createStreamingEncoder, isModelRead
     wrapper.reset();
     streamingWrapperRef.current = wrapper;
 
-    // Reset accumulation buffers
-    accumulatedSamplesRef.current = new Float32Array(0);
+    // Reset all buffers and queues
+    inputQueueRef.current = [];
+    pendingBufferRef.current = new Float32Array(0);
     watermarkedChunksRef.current = [];
+    visInputRef.current.fill(0);
+    visOutputRef.current.fill(0);
+    stopRequestedRef.current = false;
 
     // Clear previous recording
     if (recordedAudioUrl) {
@@ -153,86 +257,18 @@ export function RealtimeEmbedDemo({ onEmbed, createStreamingEncoder, isModelRead
       const processor = audioContext.createScriptProcessor(bufferSize, 1, 1);
       processorRef.current = processor;
 
-      // Frame processing with self-chaining.
-      // After finishing one frame, immediately tries the next accumulated frame
-      // instead of waiting for the next onaudioprocess event.
-      const tryProcessNext = () => {
-        if (isProcessingRef.current) return;
-        if (accumulatedSamplesRef.current.length < FRAME_SAMPLES) return;
-
-        const frame = accumulatedSamplesRef.current.slice(0, FRAME_SAMPLES);
-        accumulatedSamplesRef.current = accumulatedSamplesRef.current.slice(FRAME_SAMPLES);
-
-        isProcessingRef.current = true;
-        const startTime = performance.now();
-
-        // Wrapper handles history buffer, message rotation, and bit indexing internally
-        streamingWrapperRef.current.processFrame(frame, messageRef.current)
-          .then(watermarkedFrame => {
-            const latency = performance.now() - startTime;
-
-            // Save watermarked frame for final output
-            watermarkedChunksRef.current.push(watermarkedFrame);
-
-            latenciesRef.current.push(latency);
-            if (latenciesRef.current.length > 50) latenciesRef.current.shift();
-            const avgLatency = latenciesRef.current.reduce((a, b) => a + b, 0) / latenciesRef.current.length;
-
-            setStats(prev => ({
-              latencyMs: latency.toFixed(1),
-              chunksProcessed: prev.chunksProcessed + 1,
-              totalSamples: prev.totalSamples + frame.length,
-              avgLatency: avgLatency.toFixed(1)
-            }));
-
-            setInputBuffer(prev => {
-              const newBuf = new Float32Array(2048);
-              const shift = Math.min(frame.length, 2048);
-              newBuf.set(prev.slice(shift));
-              newBuf.set(frame.slice(0, shift), 2048 - shift);
-              return newBuf;
-            });
-
-            setOutputBuffer(prev => {
-              const newBuf = new Float32Array(2048);
-              const shift = Math.min(watermarkedFrame.length, 2048);
-              newBuf.set(prev.slice(shift));
-              newBuf.set(watermarkedFrame.slice(0, shift), 2048 - shift);
-              return newBuf;
-            });
-
-            isProcessingRef.current = false;
-
-            // Chain: immediately try the next accumulated frame.
-            // Only chain while streaming — after stop, stopStreaming drains remaining data.
-            if (isStreamingRef.current) {
-              tryProcessNext();
-            }
-          })
-          .catch(err => {
-            console.error('Frame processing error:', err);
-            isProcessingRef.current = false;
-          });
-      };
-
+      // Synchronous callback: just push to queue, no async processing here
       processor.onaudioprocess = (e) => {
         if (!isStreamingRef.current) return;
 
         const inputData = e.inputBuffer.getChannelData(0);
         const outputData = e.outputBuffer.getChannelData(0);
 
-        // Pass through audio for monitoring
-        outputData.set(inputData.slice(0, outputData.length));
+        // Pass through audio for monitoring (original audio)
+        outputData.set(inputData);
 
-        // Accumulate samples
-        const prev = accumulatedSamplesRef.current;
-        const newAccumulated = new Float32Array(prev.length + inputData.length);
-        newAccumulated.set(prev);
-        newAccumulated.set(inputData, prev.length);
-        accumulatedSamplesRef.current = newAccumulated;
-
-        // Kick off processing chain (no-ops if already processing)
-        tryProcessNext();
+        // Push a copy to the queue (avoid sharing ArrayBuffer)
+        inputQueueRef.current.push(new Float32Array(inputData));
       };
 
       source.connect(processor);
@@ -244,12 +280,15 @@ export function RealtimeEmbedDemo({ onEmbed, createStreamingEncoder, isModelRead
       setStats({ latencyMs: 0, chunksProcessed: 0, totalSamples: 0, avgLatency: 0 });
       latenciesRef.current = [];
 
+      // Start the processing loop (runs independently)
+      processLoop();
+
     } catch (err) {
       console.error('Failed to start streaming:', err);
     }
-  }, [createStreamingEncoder, isModelReady, message, externalMessage, generateMessage, recordedAudioUrl]);
+  }, [createStreamingEncoder, isModelReady, message, externalMessage, generateMessage, recordedAudioUrl, processLoop]);
 
-  // Stop streaming — drain remaining accumulated samples, then concatenate
+  // Stop streaming — signal the processing loop to stop, then drain remaining samples
   const stopStreaming = useCallback(async () => {
     isStreamingRef.current = false;
     setIsStreaming(false);
@@ -261,20 +300,33 @@ export function RealtimeEmbedDemo({ onEmbed, createStreamingEncoder, isModelRead
     if (audioContextRef.current) { audioContextRef.current.close(); audioContextRef.current = null; }
     if (mediaStreamRef.current) { mediaStreamRef.current.getTracks().forEach(t => t.stop()); mediaStreamRef.current = null; }
 
-    // Wait for any in-flight inference to complete
+    // Signal the processing loop to stop
+    stopRequestedRef.current = true;
+
+    // Wait for any in-flight processing to complete
     await new Promise((resolve) => {
       const check = () => isProcessingRef.current ? setTimeout(check, 10) : resolve();
       check();
     });
 
-    // Drain all remaining accumulated samples through the wrapper.
-    // Each frame is processed individually with full history context.
+    // Drain remaining queue and pending buffer
     const wrapper = streamingWrapperRef.current;
     const msg = messageRef.current;
 
-    while (accumulatedSamplesRef.current.length >= FRAME_SAMPLES && wrapper && msg) {
-      const frame = accumulatedSamplesRef.current.slice(0, FRAME_SAMPLES);
-      accumulatedSamplesRef.current = accumulatedSamplesRef.current.slice(FRAME_SAMPLES);
+    // First, drain the queue into pending buffer
+    while (inputQueueRef.current.length > 0) {
+      const chunk = inputQueueRef.current.shift();
+      const prev = pendingBufferRef.current;
+      const combined = new Float32Array(prev.length + chunk.length);
+      combined.set(prev);
+      combined.set(chunk, prev.length);
+      pendingBufferRef.current = combined;
+    }
+
+    // Then process all complete frames
+    while (pendingBufferRef.current.length >= FRAME_SAMPLES && wrapper && msg) {
+      const frame = pendingBufferRef.current.slice(0, FRAME_SAMPLES);
+      pendingBufferRef.current = pendingBufferRef.current.slice(FRAME_SAMPLES);
 
       try {
         const watermarkedFrame = await wrapper.processFrame(frame, msg);
@@ -328,15 +380,19 @@ export function RealtimeEmbedDemo({ onEmbed, createStreamingEncoder, isModelRead
     if (recordedAudioUrl) URL.revokeObjectURL(recordedAudioUrl);
     setRecordedAudio(null);
     setRecordedAudioUrl(null);
-    setInputBuffer(new Float32Array(2048));
-    setOutputBuffer(new Float32Array(2048));
+    setInputBuffer(new Float32Array(VIS_BUFFER_SIZE));
+    setOutputBuffer(new Float32Array(VIS_BUFFER_SIZE));
     setStats({ latencyMs: 0, chunksProcessed: 0, totalSamples: 0, avgLatency: 0 });
     streamingWrapperRef.current = null;
+    inputQueueRef.current = [];
+    pendingBufferRef.current = new Float32Array(0);
+    watermarkedChunksRef.current = [];
   }, [recordedAudioUrl]);
 
   // Cleanup on unmount
   useEffect(() => {
     return () => {
+      stopRequestedRef.current = true;
       if (isStreamingRef.current) {
         isStreamingRef.current = false;
         if (processorRef.current) processorRef.current.disconnect();
