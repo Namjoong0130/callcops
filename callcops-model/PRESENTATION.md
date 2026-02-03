@@ -391,7 +391,96 @@ $$
 
    Gate가 1에 가까우면 원본 오디오를, 0에 가까우면 비트 정보를 더 반영한다. 네트워크는 **비트를 삽입하되 오디오를 최대한 보존하는** 최적의 균형점을 학습한다.
 
-#### 3.2.2 섭동(Perturbation) 생성
+#### 3.2.2 Post-Fusion Refinement: SEBlock과 Dilated Residual Blocks
+
+FrameWiseFusionBlock에서 비트 정보가 오디오 피처에 융합된 직후, **SEBlock**과 **Dilated Residual Blocks**가 순차적으로 적용된다. 이 두 블록이 **이 위치에** 배치되는 이유를 이해하는 것이 아키텍처의 핵심이다.
+
+**① SEBlock — 인코더 3단계 (Post-Fusion Refinement)**
+
+```python
+# rtaw_net.py, Encoder.__init__ (lines 381-384)
+self.fusion_refine = nn.Sequential(
+    ConvBlock(256, 256, kernel_size=3, padding=1),
+    SEBlock(256),  # ← 비트 융합 직후 배치
+)
+```
+
+비트 융합 직후에 SEBlock을 배치하는 이유:
+
+1. **채널 선별**: FrameWiseFusion 후, 256개 채널 중 어떤 채널이 워터마크 정보를 효과적으로 담고 있는지 **자동으로 판별**한다
+2. **에너지 집중**: 워터마크에 기여하지 않는 채널의 가중치를 낮추고, 핵심 채널을 강화한다
+3. **후속 연산 효율화**: 이 재가중이 없으면 이후 Residual Block들이 모든 채널에 동일하게 연산을 수행하여 비효율적이다
+
+```text
+[B, 256, T]
+  → ConvBlock(3×1) → [B, 256, T]
+  → SEBlock:
+      Global Average Pool → [B, 256, 1]   (시간 축 전체를 하나로 압축)
+      FC(256→32) → ReLU                    (차원 축소: 어떤 채널이 중요한지 학습)
+      FC(32→256) → Sigmoid                 (0~1 사이의 가중치 생성)
+      × 입력 → [B, 256, T]                (채널별 재가중)
+```
+
+예를 들어, SEBlock이 특정 채널에 0.9, 다른 채널에 0.1의 가중치를 부여하면, 네트워크는 자연스럽게 **인간이 덜 민감한 주파수 대역에 워터마크 에너지를 집중**시키는 효과를 얻는다.
+
+**② Dilated Residual Blocks — 인코더 4단계**
+
+```python
+# rtaw_net.py, Encoder.__init__ (lines 390-397)
+self.residual_blocks = nn.ModuleList([
+    ResidualBlock(channels=256, kernel_size=3, dilation=2**(i % 4))
+    for i in range(4)
+])
+# → Block 0: dilation=1, Block 1: dilation=2, Block 2: dilation=4, Block 3: dilation=8
+```
+
+4개의 ResidualBlock이 점진적으로 증가하는 dilation rate `[1, 2, 4, 8]`로 배치된다.
+
+**왜 이 위치인가?**
+
+비트 융합과 SEBlock을 거친 피처는 이미 **"어디에 워터마크를 넣을지"가 결정된 상태**이다. Dilated Residual Block들은 이 결정을 **주변 시간 맥락을 고려하여 정제**하는 역할을 한다.
+
+```text
+Block 0 (dilation=1): kernel_size=3 → 3 samples 맥락
+  "바로 인접한 샘플과의 일관성 확보"
+
+Block 1 (dilation=2): kernel_size=3, 한 칸 건너 → 5 samples 맥락
+  "약간 떨어진 샘플과의 조화"
+
+Block 2 (dilation=4): kernel_size=3, 세 칸 건너 → 9 samples 맥락
+  "더 넓은 시간 범위에서의 자연스러움"
+
+Block 3 (dilation=8): kernel_size=3, 일곱 칸 건너 → 17 samples 맥락
+  "프레임 경계를 넘어서는 연속성 보장"
+```
+
+4개 블록을 모두 통과하면 총 누적 receptive field는 약 30 samples (3.75ms)이다. 이를 통해 인접 프레임 간 **워터마크의 시간적 연속성**이 보장되어, 40ms 프레임 경계에서 갑작스러운 불연속이 발생하지 않는다.
+
+**정리: 인코더 내 빌딩블록 배치 요약**
+
+```text
+Audio + Message
+     │
+     ▼
+[ConvBlock ×4]        ← 기본 합성곱: 오디오 → 256차원 특징 추출
+     │
+     ▼
+[FrameWiseFusion]     ← 프레임별 비트 삽입
+     │
+     ▼
+[ConvBlock + SEBlock]  ← ★ SEBlock: 워터마크 관련 채널 강화
+     │
+     ▼
+[ResidualBlock ×4]    ← ★ Dilated Conv: 시간적 맥락 확장 (1,2,4,8)
+     │
+     ▼
+[ConvBlock ×3]        ← 오디오 복원 (256→32 채널)
+     │
+     ▼
+[Output Conv + tanh]  ← 섭동 생성
+```
+
+#### 3.2.3 섭동(Perturbation) 생성
 
 인코더의 최종 출력은 `tanh` 활성화를 거친 후 스케일링 팩터 $\alpha$를 곱한다:
 
@@ -463,7 +552,79 @@ $$
 
 인코더와 달리 디코더는 **stride=2 합성곱**을 4번 적용하여 시간 해상도를 $2^4 = 16$배 축소한다. 8000 samples → 500 features가 된다. 이렇게 축소하는 이유는 비트 추출에는 세밀한 시간 해상도가 불필요하기 때문이다. 40ms 프레임(320 samples)은 축소 후 $320/16 = 20$ features로 표현되며, 이 20개의 값에서 1비트를 판별하면 충분하다.
 
-#### 3.3.1 FrameWiseBitExtractor
+#### 3.3.1 디코더의 Dilated Residual Blocks와 SEBlock
+
+디코더에서도 인코더와 동일한 빌딩블록이 사용되지만, **배치 순서와 역할이 다르다**.
+
+**① Dilated Residual Blocks — 디코더 2단계**
+
+```python
+# rtaw_net.py, Decoder.__init__ (lines 542-549)
+self.residual_blocks = nn.ModuleList([
+    ResidualBlock(channels=256, kernel_size=3, dilation=2**(i % 4))
+    for i in range(4)
+])
+# → dilation = [1, 2, 4, 8]
+```
+
+Feature Extraction 직후에 배치되며, **16배 축소된 시간 축**에서 동작한다는 점이 인코더와의 핵심 차이이다.
+
+- 원본 시간 축에서 dilation=8이면 17 samples (2.1ms)를 커버하지만,
+- 16배 축소된 피처 맵에서 dilation=8이면 **17 × 16 = 272 samples (34ms)** 에 해당하는 원본 시간 범위를 커버한다
+- 이는 거의 **1프레임(40ms) 전체**에 근접하는 범위로, 프레임 내 패턴 전체를 파악할 수 있다
+
+```text
+다운샘플된 피처 [B, 256, 500]에서:
+
+Block 0 (dilation=1): 3 features = 원본 48 samples (6ms)
+Block 1 (dilation=2): 5 features = 원본 80 samples (10ms)
+Block 2 (dilation=4): 9 features = 원본 144 samples (18ms)
+Block 3 (dilation=8): 17 features = 원본 272 samples (34ms)
+```
+
+디코더의 Dilated Conv는 인코더가 삽입한 워터마크 패턴을 **넓은 시간 맥락에서 검출**하는 역할을 한다. 특히 코덱(G.711, G.729)을 거쳐 왜곡된 오디오에서도 워터마크를 인식하려면, 단일 지점이 아닌 주변 문맥까지 함께 살펴봐야 하기 때문이다.
+
+**② SEBlock — 디코더 3단계 (비트 추출 직전)**
+
+```python
+# rtaw_net.py, Decoder.__init__ (line 552)
+self.se_block = SEBlock(hidden_channels[-1])  # SEBlock(256)
+```
+
+Residual Blocks를 통과한 피처에 SEBlock이 적용된 후 BitExtractor로 전달된다.
+
+인코더에서는 SEBlock이 **비트 융합 직후**(3단계)에 있지만, 디코더에서는 **비트 추출 직전**(3단계)에 있다. 이 대칭적 배치는 의도적이다:
+
+| 위치 | 인코더 SEBlock | 디코더 SEBlock |
+|------|---------------|---------------|
+| 단계 | 3단계 (Fusion 직후) | 3단계 (Extraction 직전) |
+| 역할 | 워터마크를 **삽입할** 채널 강화 | 워터마크를 **추출할** 채널 강화 |
+| 효과 | 불필요한 채널 억제 → 정제 효율↑ | 노이즈 채널 억제 → 추출 정확도↑ |
+
+디코더의 SEBlock은 코덱이나 노이즈로 인해 손상된 채널을 자동으로 **낮은 가중치**로 처리하고, 워터마크 정보가 잘 보존된 채널에 집중하도록 한다. 이를 통해 열악한 조건에서도 비트 추출 정확도가 향상된다.
+
+**정리: 디코더 내 빌딩블록 배치 요약**
+
+```text
+Watermarked Audio [B, 1, T]
+     │
+     ▼
+[ConvBlock ×4, stride=2]   ← 특징 추출 + 16배 다운샘플링
+     │ [B, 256, T/16]
+     ▼
+[ResidualBlock ×4]         ← ★ Dilated Conv (1,2,4,8): 워터마크 패턴 검출
+     │
+     ▼
+[SEBlock]                  ← ★ SEBlock: 워터마크 관련 채널에 집중
+     │
+     ▼
+[FrameWiseBitExtractor]    ← 프레임당 1비트 추출
+     │ [B, num_frames]
+     ▼
+비트 로짓 출력
+```
+
+#### 3.3.2 FrameWiseBitExtractor
 
 Feature Extractor에서 시간 해상도가 16배 축소되었으므로, 원래 320 samples인 프레임은 320/16 = 20 features로 표현된다.
 
@@ -474,7 +635,7 @@ Feature Extractor에서 시간 해상도가 16배 축소되었으므로, 원래 
 
 이 방식의 장점은 **O(1) 복잡도**이다. 입력 길이에 관계없이 프레임당 고정 연산만 수행한다.
 
-#### 3.3.2 128비트 복원 (Cyclic Aggregation)
+#### 3.3.3 128비트 복원 (Cyclic Aggregation)
 
 프레임별 로짓을 128비트 페이로드로 복원하는 과정:
 
