@@ -48,10 +48,14 @@ export function useInference() {
 
       console.log('Loading decoder model (Frame-Wise v2.0)...');
 
+      // Try GPU-accelerated backends first, fall back to WASM
+      // WebGPU > WebGL > WASM (performance order)
       const session = await ort.InferenceSession.create(DECODER_MODEL_PATH, {
-        executionProviders: ['wasm'],
+        executionProviders: ['webgpu', 'webgl', 'wasm'],
         graphOptimizationLevel: 'all',
       });
+
+      console.log('Decoder using backend:', session.handler?._ep?.name || 'unknown');
 
       decoderSessionRef.current = session;
       setIsReady(true);
@@ -80,10 +84,14 @@ export function useInference() {
 
       console.log('Loading encoder model (Frame-Wise v2.0)...');
 
+      // Try GPU-accelerated backends first, fall back to WASM
+      // WebGPU > WebGL > WASM (performance order)
       const session = await ort.InferenceSession.create(ENCODER_MODEL_PATH, {
-        executionProviders: ['wasm'],
+        executionProviders: ['webgpu', 'webgl', 'wasm'],
         graphOptimizationLevel: 'all',
       });
+
+      console.log('Encoder using backend:', session.handler?._ep?.name || 'unknown');
 
       encoderSessionRef.current = session;
       console.log('Encoder model loaded successfully');

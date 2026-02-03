@@ -16,7 +16,7 @@ const FFT_SIZE = 1024;
 const NUM_BINS = FFT_SIZE / 2;       // 512 bins, 0–4 kHz
 const SMOOTHING = 0.5;               // Moderate smoothing, smooth at 30fps
 const DC_SKIP_BINS = 4;              // Skip 0-31 Hz (DC + sub-bass noise)
-const DISPLAY_BINS = NUM_BINS - DC_SKIP_BINS;
+const DISPLAY_BINS = NUM_BINS - DC_SKIP_BINS;  // 508 bins to display
 const DB_MIN = -80;
 const DB_MAX = 0;
 const DB_RANGE = DB_MAX - DB_MIN;
@@ -153,7 +153,12 @@ export function RealtimeOscilloscope({
     const fqX  = (hz) => { const bin = hz / (8000 / FFT_SIZE); return PL + (Math.max(0, bin - DC_SKIP_BINS) / DISPLAY_BINS) * pW; };
 
     const freqs = [0, 500, 1000, 1500, 2000, 2500, 3000, 3500, 4000];
-    const barW = pW / DISPLAY_BINS;
+    const binW = pW / DISPLAY_BINS;  // Width per bin (~1.1px)
+
+    // Pre-create gradient objects (reused every frame instead of recreated)
+    const gradientIn = ctx.createLinearGradient(0, PT, 0, PT + pH);
+    gradientIn.addColorStop(0, 'rgba(56,189,248,0.35)');
+    gradientIn.addColorStop(1, 'rgba(56,189,248,0.03)');
 
     const render = (now) => {
       animationRef.current = requestAnimationFrame(render);
@@ -202,38 +207,36 @@ export function RealtimeOscilloscope({
       ctx.fillStyle = '#64748b'; ctx.font = '9px sans-serif'; ctx.textAlign = 'center';
       ctx.fillText('Magnitude (dB)', 0, 0); ctx.restore();
 
-      // Diff highlight bars
+      // Diff highlight bars (508 individual bins)
       for (let i = DC_SKIP_BINS; i < NUM_BINS; i++) {
         const d = sOut[i] - sIn[i]; if (Math.abs(d) < 0.3) continue;
         const x = binX(i), y1 = dbY(sIn[i]), y2 = dbY(sOut[i]);
         const a = Math.min(0.75, Math.min(Math.abs(d), 20) / 12);
         ctx.fillStyle = d > 0 ? `rgba(250,204,21,${a})` : `rgba(248,113,113,${a})`;
-        ctx.fillRect(x, Math.min(y1, y2), barW + 0.5, Math.abs(y2 - y1) || 1);
+        ctx.fillRect(x, Math.min(y1, y2), Math.max(binW, 1), Math.abs(y2 - y1) || 1);
       }
 
-      // Input fill
+      // Input fill (uses pre-created gradient)
       ctx.beginPath(); ctx.moveTo(binX(DC_SKIP_BINS), dbY(DB_MIN));
-      for (let i = DC_SKIP_BINS; i < NUM_BINS; i++) ctx.lineTo(binX(i), dbY(sIn[i]));
-      ctx.lineTo(binX(NUM_BINS - 1), dbY(DB_MIN)); ctx.closePath();
-      const gIn = ctx.createLinearGradient(0, PT, 0, PT + pH);
-      gIn.addColorStop(0, 'rgba(56,189,248,0.35)'); gIn.addColorStop(1, 'rgba(56,189,248,0.03)');
-      ctx.fillStyle = gIn; ctx.fill();
+      for (let i = DC_SKIP_BINS; i < NUM_BINS; i++) ctx.lineTo(binX(i) + binW / 2, dbY(sIn[i]));
+      ctx.lineTo(binX(NUM_BINS - 1) + binW, dbY(DB_MIN)); ctx.closePath();
+      ctx.fillStyle = gradientIn; ctx.fill();
 
-      // Input line
+      // Input line (508 points)
       ctx.beginPath();
       for (let i = DC_SKIP_BINS; i < NUM_BINS; i++) {
-        const x = binX(i), y = dbY(sIn[i]);
+        const x = binX(i) + binW / 2, y = dbY(sIn[i]);
         i === DC_SKIP_BINS ? ctx.moveTo(x, y) : ctx.lineTo(x, y);
       }
-      ctx.strokeStyle = 'rgba(56,189,248,0.85)'; ctx.lineWidth = 1.2; ctx.stroke();
+      ctx.strokeStyle = 'rgba(56,189,248,0.85)'; ctx.lineWidth = 1.5; ctx.stroke();
 
-      // Output line
+      // Output line (508 points)
       ctx.beginPath();
       for (let i = DC_SKIP_BINS; i < NUM_BINS; i++) {
-        const x = binX(i), y = dbY(sOut[i]);
+        const x = binX(i) + binW / 2, y = dbY(sOut[i]);
         i === DC_SKIP_BINS ? ctx.moveTo(x, y) : ctx.lineTo(x, y);
       }
-      ctx.strokeStyle = 'rgba(192,132,252,0.95)'; ctx.lineWidth = 1.8; ctx.stroke();
+      ctx.strokeStyle = 'rgba(192,132,252,0.95)'; ctx.lineWidth = 2; ctx.stroke();
 
       // Legend
       ctx.fillStyle = '#e2e8f0'; ctx.font = 'bold 11px sans-serif'; ctx.textAlign = 'left';
@@ -274,35 +277,37 @@ export function RealtimeOscilloscope({
       dCtx.fillStyle = '#64748b'; dCtx.font = '9px sans-serif'; dCtx.textAlign = 'center';
       dCtx.fillText('Hz', PL + pW / 2, dPT + dpH + 22);
 
-      // Diff bars
+      // Diff bars (508 individual bins)
       for (let i = DC_SKIP_BINS; i < NUM_BINS; i++) {
         const d = sOut[i] - sIn[i]; if (Math.abs(d) < 0.15) continue;
         const x = binX(i), y = dffY(d);
         const a = 0.3 + (Math.min(Math.abs(d), 6) / 6) * 0.65;
         dCtx.fillStyle = d > 0 ? `rgba(250,204,21,${a})` : `rgba(248,113,113,${a})`;
-        dCtx.fillRect(x, Math.min(zy, y), barW + 0.5, Math.abs(zy - y) || 1);
+        dCtx.fillRect(x, Math.min(zy, y), Math.max(binW, 1), Math.abs(zy - y) || 1);
       }
 
-      // Diff line
+      // Diff line (508 points)
       dCtx.beginPath();
       for (let i = DC_SKIP_BINS; i < NUM_BINS; i++) {
-        const d = sOut[i] - sIn[i], x = binX(i), y = dffY(d);
+        const d = sOut[i] - sIn[i];
+        const x = binX(i) + binW / 2, y = dffY(d);
         i === DC_SKIP_BINS ? dCtx.moveTo(x, y) : dCtx.lineTo(x, y);
       }
-      dCtx.strokeStyle = 'rgba(250,204,21,0.9)'; dCtx.lineWidth = 1.2; dCtx.stroke();
+      dCtx.strokeStyle = 'rgba(250,204,21,0.9)'; dCtx.lineWidth = 1.5; dCtx.stroke();
 
       // Title + stats
       dCtx.fillStyle = '#e2e8f0'; dCtx.font = 'bold 10px sans-serif'; dCtx.textAlign = 'left';
       dCtx.fillText('Watermark Perturbation: encoder(audio, msg) \u2212 audio', PL, 14);
 
-      let sumD = 0, maxD = 0, peakB = DC_SKIP_BINS;
+      let sumD = 0, maxD = 0, peakBin = DC_SKIP_BINS;
       for (let i = DC_SKIP_BINS; i < NUM_BINS; i++) {
         const d = Math.abs(sOut[i] - sIn[i]); sumD += d;
-        if (d > maxD) { maxD = d; peakB = i; }
+        if (d > maxD) { maxD = d; peakBin = i; }
       }
+      const peakHz = Math.round((peakBin / NUM_BINS) * 4000);
       dCtx.fillStyle = '#94a3b8'; dCtx.font = '9px monospace'; dCtx.textAlign = 'right';
       dCtx.fillText(
-        `avg \u0394${(sumD / DISPLAY_BINS).toFixed(1)}dB  peak \u0394${maxD.toFixed(1)}dB @ ${Math.round((peakB / NUM_BINS) * 4000)}Hz`,
+        `avg \u0394${(sumD / DISPLAY_BINS).toFixed(1)}dB  peak \u0394${maxD.toFixed(1)}dB @ ${peakHz}Hz`,
         PL + pW, 14
       );
     };

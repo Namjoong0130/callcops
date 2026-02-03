@@ -988,17 +988,115 @@ x = F.pad(x, (causal_padding, 0))      # (left, right=0)
 
 이로써 출력의 각 샘플이 **오직 과거 입력에만 의존**하게 된다.
 
-**Receptive Field 비교:**
+### 8.3 Receptive Field (수용 영역)
+
+#### 8.3.1 Receptive Field란?
+
+**Receptive Field(RF)**란, 출력의 한 샘플을 계산할 때 실제로 참조하는 **입력 샘플의 범위**를 말한다. 이미지 처리에서의 "시야"와 동일한 개념이다.
+
+```text
+입력:   [. . . . ● ● ● ● ● . . . .]
+                 ↑ ← RF → ↑
+출력:              [  ★  ]
+
+★ 하나를 계산하기 위해, 입력에서 ● 범위만큼을 참조한다.
+이 범위의 크기가 Receptive Field이다.
+```
+
+Conv1d 단일 레이어의 RF는 간단하다:
+
+$$
+\text{RF}_{\text{1-layer}} = (\text{kernel\_size} - 1) \times \text{dilation} + 1
+$$
+
+여러 레이어가 순차적으로 쌓이면, 각 레이어의 기여분이 **누적**된다:
+
+$$
+\text{RF}_{\text{total}} = 1 + \sum_{i=1}^{L} (\text{kernel\_size}_i - 1) \times \text{dilation}_i
+$$
+
+(모든 stride=1인 경우. Stride가 있으면 이후 레이어의 기여분이 stride 배율만큼 증폭됨)
+
+대칭 패딩(Non-Causal)에서는 RF가 **양쪽으로 동일하게** 확장되므로, 한쪽(편측)은 절반이다:
+
+$$
+\text{RF}_{\text{one-sided}} = \frac{\text{RF}_{\text{total}} - 1}{2}
+$$
+
+#### 8.3.2 Non-Causal 인코더의 정확한 RF 계산
+
+인코더의 모든 Conv 레이어를 순서대로 나열하면:
+
+| 단계 | 레이어 | kernel | dilation | (k-1)×d | 누적 RF |
+|------|--------|--------|----------|---------|---------|
+| Feature Conv 1 | ConvBlock | 7 | 1 | 6 | 7 |
+| Feature Conv 2 | ConvBlock | 7 | 1 | 6 | 13 |
+| Feature Conv 3 | ConvBlock | 7 | 1 | 6 | 19 |
+| Feature Conv 4 | ConvBlock | 7 | 1 | 6 | 25 |
+| Fusion temporal | DW-Conv | 3 | 1 | 2 | 27 |
+| Fusion output | Conv | 3 | 1 | 2 | 29 |
+| Post-fusion | ConvBlock | 3 | 1 | 2 | 31 |
+| ResBlock 0 conv1 | Conv | 3 | 1 | 2 | 33 |
+| ResBlock 0 conv2 | Conv | 3 | 1 | 2 | 35 |
+| ResBlock 1 conv1 | Conv | 3 | 2 | 4 | 39 |
+| ResBlock 1 conv2 | Conv | 3 | 2 | 4 | 43 |
+| ResBlock 2 conv1 | Conv | 3 | 4 | 8 | 51 |
+| ResBlock 2 conv2 | Conv | 3 | 4 | 8 | 59 |
+| ResBlock 3 conv1 | Conv | 3 | 8 | 16 | 75 |
+| ResBlock 3 conv2 | Conv | 3 | 8 | 16 | 91 |
+| Audio Dec Conv 1 | ConvBlock | 7 | 1 | 6 | 97 |
+| Audio Dec Conv 2 | ConvBlock | 7 | 1 | 6 | 103 |
+| Audio Dec Conv 3 | ConvBlock | 7 | 1 | 6 | 109 |
+| Output Conv | Conv | 7 | 1 | 6 | 115 |
+
+$$
+\text{RF}_{\text{total}} = 115 \text{ samples (양쪽)}
+$$
+
+$$
+\text{RF}_{\text{one-sided}} = \frac{115 - 1}{2} = 57 \text{ samples} = \frac{57}{8000} \approx 7.1 \text{ms}
+$$
+
+즉, 출력의 한 샘플을 계산하기 위해 **좌우 각각 57개 입력 샘플**만 참조한다.
+
+#### 8.3.3 191ms 오해와 교정
+
+개발 초기에 인코더의 RF가 약 **191ms (~1,528 samples)**로 추정되었다. 이는 다음과 같은 원인들로 과대평가된 값이었다:
+
+1. **잘못된 계산 공식**: `kernel_size × dilation`을 사용 (올바른 공식은 `(kernel_size - 1) × dilation`)
+2. **인코더와 디코더 혼동**: 비트 추출용 Decoder의 RF를 인코더에 합산 (인코더와 디코더는 독립적으로 동작)
+3. **Residual Block의 skip connection 미고려**: Skip connection은 RF를 제한하는 역할을 함
+
+**교정 결과:**
+
+| | 초기 추정 (잘못된 값) | 실제 계산 |
+|---|---|---|
+| RF (편측) | ~1,528 samples | **57 samples** |
+| 시간 | ~191ms | **~7ms** |
+| 오차 배율 | - | **27배 과대평가** |
+
+이 교정이 스트리밍 아키텍처에 미친 영향은 매우 크다:
+
+- RF가 191ms였다면: 최소 **4~5프레임(160~200ms)** 의 히스토리가 반드시 필요
+- RF가 7ms였다면: 이론적으로 **1프레임(40ms)** 의 히스토리만으로도 충분
+
+실제로는 안정성을 위해 5프레임(1,600 samples)의 히스토리를 사용하는데, 이는 실제 RF의 **28배**에 해당하므로 매우 넉넉한 여유분이다. BatchNorm 통계 안정성과 경계 효과 제거에 충분하다.
+
+#### 8.3.4 Receptive Field 비교 요약
 
 | 구성 요소 | Non-Causal (편측) | Causal (과거만) |
 |-----------|------------------|----------------|
-| Encoder (4 Conv, k=7) | ~12 samples | 24 samples |
-| Residual (4 blocks, dilation 1,2,4,8) | ~15 samples | 30 samples |
-| Decoder (3 Conv, k=7) | ~9 samples | 18 samples |
-| Output (k=7) | ~3 samples | 6 samples |
-| **합계** | **~57 samples (~7ms)** | **~78 samples (~10ms)** |
+| Encoder (4 Conv, k=7) | 12 samples | 24 samples |
+| Fusion (temporal + output) | 2 samples | 2 samples |
+| Post-fusion (Conv k=3) | 1 sample | 2 samples |
+| Residual (4 blocks, d=1,2,4,8) | 30 samples | 60 samples |
+| Audio Decoder (3 Conv, k=7) | 9 samples | 18 samples |
+| Output (k=7) | 3 samples | 6 samples |
+| **합계** | **57 samples (7ms)** | **~112 samples (~14ms)** |
 
-### 8.3 스트리밍 추론
+Non-Causal은 양쪽 합산 후 반으로 나눈 **편측 RF**이고, Causal은 왼쪽(과거)에만 패딩하므로 **전체가 과거 방향 RF**이다. Causal이 수치상 더 크지만, 이는 한 쪽 방향으로만 확장되기 때문이며, 미래 참조(look-ahead)는 0이다.
+
+### 8.4 스트리밍 추론
 
 #### Non-Causal 스트리밍 (StreamingEncoderWrapper)
 

@@ -26,13 +26,15 @@ const SAMPLE_RATE = 8000;
 const FRAME_SAMPLES = 320;       // 40ms @ 8kHz — model's atomic unit (1 bit per frame)
 const PAYLOAD_LENGTH = 128;      // 128-bit cyclic payload
 const VIS_BUFFER_SIZE = 2048;    // Visualization buffer size
+const VIS_THROTTLE_MS = 80;     // ~12fps for visualization React state updates
+const MAX_DRAIN_FRAMES = 75;    // Max frames to process during finalization (~3s of audio)
 
 export function RealtimeEmbedDemo({ onEmbed, createStreamingEncoder, isModelReady = false, externalMessage = null, onVerify }) {
   const [isStreaming, setIsStreaming] = useState(false);
   const [isFinalizing, setIsFinalizing] = useState(false);
+  const [finalizeProgress, setFinalizeProgress] = useState(''); // Progress text during finalization
   const [recordedAudio, setRecordedAudio] = useState(null);
   const [recordedAudioUrl, setRecordedAudioUrl] = useState(null);
-  const [message, setMessage] = useState(null);
   const [stats, setStats] = useState({
     latencyMs: 0,
     chunksProcessed: 0,
@@ -69,40 +71,22 @@ export function RealtimeEmbedDemo({ onEmbed, createStreamingEncoder, isModelRead
   // Streaming wrapper ref — holds the StreamingEncoderWrapper instance
   const streamingWrapperRef = useRef(null);
 
-  // Generate random 128-bit message
-  const generateMessage = useCallback(() => {
-    const msg = new Float32Array(128);
-    for (let i = 0; i < 128; i++) {
-      msg[i] = Math.random() > 0.5 ? 1 : 0;
-    }
-    setMessage(msg);
-    return msg;
-  }, []);
-
-  // Update visualization buffers (rolling window)
-  const updateVisualization = useCallback((inputFrame, outputFrame) => {
-    // Shift left and append new samples
-    const shiftAmount = inputFrame.length;
-    
-    // Input visualization
-    visInputRef.current.copyWithin(0, shiftAmount);
-    visInputRef.current.set(inputFrame, VIS_BUFFER_SIZE - shiftAmount);
-    
-    // Output visualization  
-    visOutputRef.current.copyWithin(0, shiftAmount);
-    visOutputRef.current.set(outputFrame, VIS_BUFFER_SIZE - shiftAmount);
-    
-    // Batch update React state (creates new array refs for FFT cache invalidation)
-    setInputBuffer(visInputRef.current.slice());
-    setOutputBuffer(visOutputRef.current.slice());
-  }, []);
+  // Visualization throttle
+  const lastVisTimeRef = useRef(0);
+  const lastInputVisTimeRef = useRef(0);  // Separate throttle for input visualization
 
   /**
-   * Sequential processing loop.
-   * 
-   * This function processes frames one at a time from the queue.
-   * It uses a mutex (isProcessingRef) to ensure only one instance runs.
-   * New audio chunks are pushed to inputQueueRef by onaudioprocess.
+   * Sequential processing loop (optimized).
+   *
+   * Key optimizations vs. original:
+   * 1. Batch-drains queue with splice(0) instead of per-item shift()
+   * 2. Processes ALL complete frames with offset tracking (one final slice)
+   * 3. React state updates (setStats, setInputBuffer, setOutputBuffer) are
+   *    batched per-iteration and visualization is throttled to ~12fps
+   * 4. Yields every 4 frames to let ScriptProcessor callbacks fire
+   *
+   * Result: ~75 React re-renders/sec → ~15, freeing the main thread for
+   * ONNX inference and canvas rendering.
    */
   const processLoop = useCallback(async () => {
     // Mutex: only one loop instance at a time
@@ -114,56 +98,90 @@ export function RealtimeEmbedDemo({ onEmbed, createStreamingEncoder, isModelRead
 
     try {
       while (!stopRequestedRef.current) {
-        // 1. Drain queue into pending buffer
-        while (inputQueueRef.current.length > 0) {
-          const chunk = inputQueueRef.current.shift();
+        // 1. Drain queue into pending buffer (batch splice)
+        if (inputQueueRef.current.length > 0) {
+          const chunks = inputQueueRef.current.splice(0);
+          let totalLen = 0;
+          for (const c of chunks) totalLen += c.length;
           const prev = pendingBufferRef.current;
-          const combined = new Float32Array(prev.length + chunk.length);
+          const combined = new Float32Array(prev.length + totalLen);
           combined.set(prev);
-          combined.set(chunk, prev.length);
+          let writePos = prev.length;
+          for (const c of chunks) {
+            combined.set(c, writePos);
+            writePos += c.length;
+          }
           pendingBufferRef.current = combined;
         }
 
-        // 2. Process complete frames
+        // 2. Not enough data for a complete frame — yield and wait
         if (pendingBufferRef.current.length < FRAME_SAMPLES) {
-          // Not enough samples yet — yield and wait
           await new Promise(r => setTimeout(r, 5));
           continue;
         }
 
-        // Extract one frame
-        const frame = pendingBufferRef.current.slice(0, FRAME_SAMPLES);
-        pendingBufferRef.current = pendingBufferRef.current.slice(FRAME_SAMPLES);
+        // 3. Process all complete frames using offset tracking
+        const pending = pendingBufferRef.current;
+        let readOffset = 0;
+        let framesProcessed = 0;
 
-        // 3. Process frame through encoder
-        const startTime = performance.now();
-        const watermarkedFrame = await wrapper.processFrame(frame, msg);
-        const latency = performance.now() - startTime;
+        while (readOffset + FRAME_SAMPLES <= pending.length) {
+          const frame = pending.slice(readOffset, readOffset + FRAME_SAMPLES);
+          readOffset += FRAME_SAMPLES;
 
-        // 4. Store watermarked output
-        watermarkedChunksRef.current.push(watermarkedFrame);
+          const startTime = performance.now();
+          const watermarkedFrame = await wrapper.processFrame(frame, msg);
+          const latency = performance.now() - startTime;
 
-        // 5. Update latency stats
-        latenciesRef.current.push(latency);
-        if (latenciesRef.current.length > 50) latenciesRef.current.shift();
-        const avgLatency = latenciesRef.current.reduce((a, b) => a + b, 0) / latenciesRef.current.length;
+          watermarkedChunksRef.current.push(watermarkedFrame);
 
-        setStats(prev => ({
-          latencyMs: latency.toFixed(1),
-          chunksProcessed: prev.chunksProcessed + 1,
-          totalSamples: prev.totalSamples + FRAME_SAMPLES,
-          avgLatency: avgLatency.toFixed(1)
-        }));
+          latenciesRef.current.push(latency);
+          if (latenciesRef.current.length > 50) latenciesRef.current.shift();
 
-        // 6. Update visualization
-        updateVisualization(frame, watermarkedFrame);
+          // Update OUTPUT visualization buffer only (input is updated in onaudioprocess)
+          visOutputRef.current.copyWithin(0, FRAME_SAMPLES);
+          visOutputRef.current.set(watermarkedFrame, VIS_BUFFER_SIZE - FRAME_SAMPLES);
+
+          framesProcessed++;
+
+          // Yield every frame to let browser handle ScriptProcessor callbacks and render
+          await new Promise(r => setTimeout(r, 0));
+        }
+
+        // Keep remaining incomplete-frame samples
+        pendingBufferRef.current = readOffset > 0
+          ? pending.slice(readOffset)
+          : pending;
+
+        // 4. Update React state ONCE per batch (not per frame!)
+        if (framesProcessed > 0) {
+          const avgLatency = latenciesRef.current.reduce((a, b) => a + b, 0) / latenciesRef.current.length;
+
+          setStats(prev => ({
+            latencyMs: latenciesRef.current[latenciesRef.current.length - 1]?.toFixed(1) || '0',
+            chunksProcessed: prev.chunksProcessed + framesProcessed,
+            totalSamples: prev.totalSamples + framesProcessed * FRAME_SAMPLES,
+            avgLatency: avgLatency.toFixed(1)
+          }));
+
+          // Throttled OUTPUT visualization state update (~12fps)
+          // Input is already updated in onaudioprocess callback
+          const now = performance.now();
+          if (now - lastVisTimeRef.current >= VIS_THROTTLE_MS) {
+            setOutputBuffer(visOutputRef.current.slice());
+            lastVisTimeRef.current = now;
+          }
+        }
+
+        // 5. Yield to allow browser events
+        await new Promise(r => setTimeout(r, 0));
       }
     } catch (err) {
       console.error('Processing loop error:', err);
     } finally {
       isProcessingRef.current = false;
     }
-  }, [updateVisualization]);
+  }, []);
 
   // WAV encoding helper
   const encodeWav = useCallback((audioData) => {
@@ -210,7 +228,13 @@ export function RealtimeEmbedDemo({ onEmbed, createStreamingEncoder, isModelRead
   const startStreaming = useCallback(async () => {
     if (!createStreamingEncoder || !isModelReady) return;
 
-    const currentMessage = externalMessage || message || generateMessage();
+    // Validate: watermark message must be set before streaming
+    if (!externalMessage) {
+      alert('워터마크 메시지를 먼저 설정해주세요.\n아래 "Set Watermark Message" 섹션에서 Timestamp와 Auth Data를 입력하세요.');
+      return;
+    }
+
+    const currentMessage = externalMessage;
     messageRef.current = currentMessage;
 
     // Create and reset the streaming wrapper
@@ -225,6 +249,7 @@ export function RealtimeEmbedDemo({ onEmbed, createStreamingEncoder, isModelRead
     visInputRef.current.fill(0);
     visOutputRef.current.fill(0);
     stopRequestedRef.current = false;
+    setFinalizeProgress('');
 
     // Clear previous recording
     if (recordedAudioUrl) {
@@ -250,6 +275,14 @@ export function RealtimeEmbedDemo({ onEmbed, createStreamingEncoder, isModelRead
       });
       audioContextRef.current = audioContext;
 
+      // Check actual sample rate — browsers may ignore the 8kHz request
+      const actualRate = audioContext.sampleRate;
+      const needsResample = actualRate !== SAMPLE_RATE;
+      if (needsResample) {
+        console.warn(`AudioContext sampleRate: ${actualRate}Hz (requested ${SAMPLE_RATE}Hz). Will downsample.`);
+      }
+      const resampleRatio = needsResample ? SAMPLE_RATE / actualRate : 1;
+
       const source = audioContext.createMediaStreamSource(stream);
       sourceRef.current = source;
 
@@ -258,6 +291,7 @@ export function RealtimeEmbedDemo({ onEmbed, createStreamingEncoder, isModelRead
       processorRef.current = processor;
 
       // Synchronous callback: just push to queue, no async processing here
+      // INPUT VISUALIZATION IS UPDATED HERE (independent of inference)
       processor.onaudioprocess = (e) => {
         if (!isStreamingRef.current) return;
 
@@ -267,8 +301,39 @@ export function RealtimeEmbedDemo({ onEmbed, createStreamingEncoder, isModelRead
         // Pass through audio for monitoring (original audio)
         outputData.set(inputData);
 
-        // Push a copy to the queue (avoid sharing ArrayBuffer)
-        inputQueueRef.current.push(new Float32Array(inputData));
+        // Downsample if needed (e.g. 48kHz → 8kHz)
+        let audioChunk;
+        if (needsResample) {
+          const outLen = Math.floor(inputData.length * resampleRatio);
+          audioChunk = new Float32Array(outLen);
+          for (let i = 0; i < outLen; i++) {
+            audioChunk[i] = inputData[Math.floor(i / resampleRatio)] || 0;
+          }
+        } else {
+          audioChunk = new Float32Array(inputData);
+        }
+
+        // Push to processing queue
+        inputQueueRef.current.push(audioChunk);
+
+        // ═══ INPUT VISUALIZATION: Update immediately (decoupled from inference) ═══
+        // This ensures the input spectrum is always responsive, even if inference lags
+        const chunkLen = audioChunk.length;
+        if (chunkLen >= VIS_BUFFER_SIZE) {
+          // Chunk is larger than buffer: take last VIS_BUFFER_SIZE samples
+          visInputRef.current.set(audioChunk.slice(chunkLen - VIS_BUFFER_SIZE));
+        } else {
+          // Shift existing data left and append new chunk
+          visInputRef.current.copyWithin(0, chunkLen);
+          visInputRef.current.set(audioChunk, VIS_BUFFER_SIZE - chunkLen);
+        }
+
+        // Throttled React state update for input visualization (~15fps)
+        const now = performance.now();
+        if (now - lastInputVisTimeRef.current >= 66) {  // ~15fps
+          setInputBuffer(visInputRef.current.slice());
+          lastInputVisTimeRef.current = now;
+        }
       };
 
       source.connect(processor);
@@ -286,7 +351,7 @@ export function RealtimeEmbedDemo({ onEmbed, createStreamingEncoder, isModelRead
     } catch (err) {
       console.error('Failed to start streaming:', err);
     }
-  }, [createStreamingEncoder, isModelReady, message, externalMessage, generateMessage, recordedAudioUrl, processLoop]);
+  }, [createStreamingEncoder, isModelReady, externalMessage, recordedAudioUrl, processLoop]);
 
   // Stop streaming — signal the processing loop to stop, then drain remaining samples
   const stopStreaming = useCallback(async () => {
@@ -313,24 +378,44 @@ export function RealtimeEmbedDemo({ onEmbed, createStreamingEncoder, isModelRead
     const wrapper = streamingWrapperRef.current;
     const msg = messageRef.current;
 
-    // First, drain the queue into pending buffer
-    while (inputQueueRef.current.length > 0) {
-      const chunk = inputQueueRef.current.shift();
+    // First, drain the queue into pending buffer (batch)
+    if (inputQueueRef.current.length > 0) {
+      const chunks = inputQueueRef.current.splice(0);
+      let totalLen = 0;
+      for (const c of chunks) totalLen += c.length;
       const prev = pendingBufferRef.current;
-      const combined = new Float32Array(prev.length + chunk.length);
+      const combined = new Float32Array(prev.length + totalLen);
       combined.set(prev);
-      combined.set(chunk, prev.length);
+      let writePos = prev.length;
+      for (const c of chunks) {
+        combined.set(c, writePos);
+        writePos += c.length;
+      }
       pendingBufferRef.current = combined;
     }
 
-    // Then process all complete frames
-    while (pendingBufferRef.current.length >= FRAME_SAMPLES && wrapper && msg) {
+    // Then process remaining complete frames (capped to prevent long finalization)
+    const totalDrainFrames = Math.floor(pendingBufferRef.current.length / FRAME_SAMPLES);
+    const framesToProcess = Math.min(totalDrainFrames, MAX_DRAIN_FRAMES);
+    if (totalDrainFrames > MAX_DRAIN_FRAMES) {
+      console.warn(`Drain: ${totalDrainFrames} frames pending, capping to ${MAX_DRAIN_FRAMES}. ` +
+        `${totalDrainFrames - MAX_DRAIN_FRAMES} frames (${((totalDrainFrames - MAX_DRAIN_FRAMES) * FRAME_SAMPLES / SAMPLE_RATE).toFixed(1)}s) will be dropped.`);
+    }
+
+    let drainedCount = 0;
+    while (drainedCount < framesToProcess && pendingBufferRef.current.length >= FRAME_SAMPLES && wrapper && msg) {
       const frame = pendingBufferRef.current.slice(0, FRAME_SAMPLES);
       pendingBufferRef.current = pendingBufferRef.current.slice(FRAME_SAMPLES);
 
       try {
         const watermarkedFrame = await wrapper.processFrame(frame, msg);
         watermarkedChunksRef.current.push(watermarkedFrame);
+        drainedCount++;
+        setFinalizeProgress(`${drainedCount}/${framesToProcess} frames`);
+        // Yield to update UI
+        if (drainedCount % 5 === 0) {
+          await new Promise(r => setTimeout(r, 0));
+        }
       } catch (err) {
         console.error('Drain frame error:', err);
         break;
@@ -468,12 +553,17 @@ export function RealtimeEmbedDemo({ onEmbed, createStreamingEncoder, isModelRead
       ) : isFinalizing ? (
         <div className="space-y-3">
           <RealtimeOscilloscope inputBuffer={inputBuffer} outputBuffer={outputBuffer} isActive={false} width={640} height={340} />
-          <div className="flex items-center justify-center gap-3 py-6">
-            <svg className="w-6 h-6 animate-spin text-yellow-400" fill="none" viewBox="0 0 24 24">
-              <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"/>
-              <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"/>
-            </svg>
-            <span className="text-sm text-yellow-400 font-medium">Finalizing...</span>
+          <div className="flex flex-col items-center justify-center gap-2 py-6">
+            <div className="flex items-center gap-3">
+              <svg className="w-6 h-6 animate-spin text-yellow-400" fill="none" viewBox="0 0 24 24">
+                <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"/>
+                <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"/>
+              </svg>
+              <span className="text-sm text-yellow-400 font-medium">Finalizing...</span>
+            </div>
+            {finalizeProgress && (
+              <span className="text-xs text-gray-400 font-mono">{finalizeProgress}</span>
+            )}
           </div>
         </div>
       ) : recordedAudio ? (
