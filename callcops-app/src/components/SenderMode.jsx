@@ -1,29 +1,26 @@
 /**
  * SenderMode - Record audio and encode with ONNX watermark
- * Uses expo-audio for recording
+ * Uses react-native-live-audio-stream to get REAL PCM data
  */
 import React, { useState, useRef, useEffect } from 'react';
-import { View, Text, TouchableOpacity, StyleSheet, Alert, Platform } from 'react-native';
-import {
-    useAudioRecorder,
-    RecordingPresets,
-    AudioModule,
-    setAudioModeAsync,
-    useAudioRecorderState,
-    useAudioPlayer
-} from 'expo-audio';
+import { View, Text, TouchableOpacity, StyleSheet, Alert, Platform, PermissionsAndroid } from 'react-native';
+import LiveAudioStream from 'react-native-live-audio-stream';
+import { Audio } from 'expo-av'; // For permission only
 import * as FileSystem from 'expo-file-system/legacy';
 import * as Sharing from 'expo-sharing';
 import { useInference } from '../hooks/useInference';
 import { calculateCRC16 } from '../utils/crc';
+import { Buffer } from 'buffer';
 
-const SAMPLE_RATE = 8000;
-const FRAME_SIZE = 320;
+// ONNX model settings
+const TARGET_SAMPLE_RATE = 16000;
+const DOWNSAMPLE_RATE = 8000;
 
 export default function SenderMode({ onBack }) {
     const [state, setState] = useState('idle');
     const [recordingTime, setRecordingTime] = useState(0);
     const [progress, setProgress] = useState(0);
+    const [statusText, setStatusText] = useState('');
     const [errorMessage, setErrorMessage] = useState(null);
     const [bitProbs, setBitProbs] = useState(null);
     const [encodedUri, setEncodedUri] = useState(null);
@@ -31,25 +28,61 @@ export default function SenderMode({ onBack }) {
     const [usedOnnx, setUsedOnnx] = useState(false);
 
     const inference = useInference();
-    const audioRecorder = useAudioRecorder(RecordingPresets.HIGH_QUALITY);
-    const recorderState = useAudioRecorderState(audioRecorder);
     const timerRef = useRef(null);
 
-    // Request permissions on mount
+    // Store raw PCM samples
+    const pcmDataRef = useRef([]);
+
+    // Configure LiveAudioStream
+    useEffect(() => {
+        const options = {
+            sampleRate: TARGET_SAMPLE_RATE,
+            channels: 1,
+            bitsPerSample: 16,
+            audioSource: 6, // Voice Recognition
+            bufferSize: 4096,
+        };
+
+        LiveAudioStream.init(options);
+
+        LiveAudioStream.on('data', data => {
+            // 'data' is a base64 encoded string of PCM samples
+            const chunk = Buffer.from(data, 'base64');
+            const samples = new Int16Array(
+                chunk.buffer,
+                chunk.byteOffset,
+                chunk.byteLength / 2
+            );
+
+            // Convert to float [-1, 1] and append
+            const floatSamples = new Float32Array(samples.length);
+            for (let i = 0; i < samples.length; i++) {
+                floatSamples[i] = samples[i] / 32768.0;
+            }
+
+            // Push individual samples to array (simple but works for demo length)
+            // For production, use Float32Array concatenation helper
+            for (let i = 0; i < floatSamples.length; i++) {
+                pcmDataRef.current.push(floatSamples[i]);
+            }
+        });
+
+        return () => {
+            LiveAudioStream.stop();
+        };
+    }, []);
+
+    // Request permissions
     useEffect(() => {
         (async () => {
-            try {
-                const status = await AudioModule.requestRecordingPermissionsAsync();
-                setPermissionGranted(status.granted);
-
-                if (status.granted) {
-                    await setAudioModeAsync({
-                        playsInSilentMode: true,
-                        allowsRecording: true,
-                    });
-                }
-            } catch (err) {
-                console.error('Permission error:', err);
+            if (Platform.OS === 'android') {
+                const granted = await PermissionsAndroid.request(
+                    PermissionsAndroid.PERMISSIONS.RECORD_AUDIO
+                );
+                setPermissionGranted(granted === PermissionsAndroid.RESULTS.GRANTED);
+            } else {
+                const { status } = await Audio.requestPermissionsAsync();
+                setPermissionGranted(status === 'granted');
             }
         })();
     }, []);
@@ -60,88 +93,53 @@ export default function SenderMode({ onBack }) {
         return `${mins.toString().padStart(2, '0')}:${secs.toString().padStart(2, '0')}`;
     };
 
-    // Generate 128-bit message with CRC
     const generateMessage = () => {
         const now = Math.floor(Date.now() / 1000);
         const syncPattern = 0xAAAA;
         const timestamp = now & 0xFFFFFFFF;
         const authCode = BigInt(Math.floor(Math.random() * 0xFFFFFFFFFFFFFFFF));
-
         const messageBits = [];
 
-        // Sync pattern (16 bits)
-        for (let i = 15; i >= 0; i--) {
-            messageBits.push((syncPattern >> i) & 1);
-        }
+        for (let i = 15; i >= 0; i--) messageBits.push((syncPattern >> i) & 1);
+        for (let i = 31; i >= 0; i--) messageBits.push((timestamp >> i) & 1);
+        for (let i = 63; i >= 0; i--) messageBits.push(Number((authCode >> BigInt(i)) & BigInt(1)));
 
-        // Timestamp (32 bits)
-        for (let i = 31; i >= 0; i--) {
-            messageBits.push((timestamp >> i) & 1);
-        }
-
-        // Auth code (64 bits)
-        for (let i = 63; i >= 0; i--) {
-            messageBits.push(Number((authCode >> BigInt(i)) & BigInt(1)));
-        }
-
-        // Calculate and append CRC-16
         const crc = calculateCRC16(messageBits.slice(0, 112));
-        for (let i = 15; i >= 0; i--) {
-            messageBits.push((crc >> i) & 1);
-        }
+        for (let i = 15; i >= 0; i--) messageBits.push((crc >> i) & 1);
 
         return messageBits;
     };
 
-    // Simple watermark embedding (fallback if ONNX fails)
+    const resampleTo8kHz = (samples) => {
+        const ratio = Math.floor(TARGET_SAMPLE_RATE / DOWNSAMPLE_RATE);
+        const result = new Float32Array(Math.floor(samples.length / ratio));
+        for (let i = 0; i < result.length; i++) {
+            result[i] = samples[i * ratio];
+        }
+        return result;
+    };
+
     const embedWatermarkSimple = (samples, messageBits) => {
         const output = new Float32Array(samples.length);
         const watermarkStrength = 0.02;
+        const FRAME_SIZE = 320;
 
         for (let i = 0; i < samples.length; i++) {
             const frameIdx = Math.floor(i / FRAME_SIZE);
             const bitIdx = frameIdx % 128;
             const bit = messageBits[bitIdx];
-
             const watermark = bit ? watermarkStrength : -watermarkStrength;
             output[i] = samples[i] + watermark * Math.sin(2 * Math.PI * i / 10);
         }
-
         return output;
     };
 
-    // Generate synthetic audio samples (since we can't decode m4a directly in JS)
-    // In production, you'd want to use a native module for audio decoding
-    const generateSyntheticAudio = (durationSeconds) => {
-        const numSamples = Math.floor(SAMPLE_RATE * durationSeconds);
-        const samples = new Float32Array(numSamples);
-
-        // Generate simple speech-like audio (multiple sine waves with varying amplitude)
-        for (let i = 0; i < numSamples; i++) {
-            const t = i / SAMPLE_RATE;
-            // Mix of frequencies to simulate voice
-            const f1 = 200 + 50 * Math.sin(2 * Math.PI * 0.5 * t); // fundamental
-            const f2 = 400 + 30 * Math.sin(2 * Math.PI * 0.3 * t); // harmonic
-            const f3 = 800 + 20 * Math.sin(2 * Math.PI * 0.7 * t); // formant
-
-            const amplitude = 0.3 * (0.7 + 0.3 * Math.sin(2 * Math.PI * 2 * t));
-            samples[i] = amplitude * (
-                0.5 * Math.sin(2 * Math.PI * f1 * t) +
-                0.3 * Math.sin(2 * Math.PI * f2 * t) +
-                0.2 * Math.sin(2 * Math.PI * f3 * t)
-            );
-        }
-
-        return samples;
-    };
-
-    // Convert Float32Array to WAV and save
     const createWavFile = async (samples) => {
         const numChannels = 1;
         const bitsPerSample = 16;
-        const byteRate = SAMPLE_RATE * numChannels * (bitsPerSample / 8);
-        const blockAlign = numChannels * (bitsPerSample / 8);
-        const dataSize = samples.length * (bitsPerSample / 8);
+        const byteRate = DOWNSAMPLE_RATE * numChannels * 2;
+        const blockAlign = numChannels * 2;
+        const dataSize = samples.length * 2;
         const buffer = new ArrayBuffer(44 + dataSize);
         const view = new DataView(buffer);
 
@@ -151,7 +149,6 @@ export default function SenderMode({ onBack }) {
             }
         };
 
-        // WAV header
         writeString(0, 'RIFF');
         view.setUint32(4, 36 + dataSize, true);
         writeString(8, 'WAVE');
@@ -159,41 +156,36 @@ export default function SenderMode({ onBack }) {
         view.setUint32(16, 16, true);
         view.setUint16(20, 1, true);
         view.setUint16(22, numChannels, true);
-        view.setUint32(24, SAMPLE_RATE, true);
+        view.setUint32(24, DOWNSAMPLE_RATE, true);
         view.setUint32(28, byteRate, true);
         view.setUint16(32, blockAlign, true);
         view.setUint16(34, bitsPerSample, true);
         writeString(36, 'data');
         view.setUint32(40, dataSize, true);
 
-        // Write samples
-        const volume = 32767;
         for (let i = 0; i < samples.length; i++) {
-            const sample = Math.max(-1, Math.min(1, samples[i]));
-            view.setInt16(44 + i * 2, sample * volume, true);
+            const s = Math.max(-1, Math.min(1, samples[i]));
+            view.setInt16(44 + i * 2, s < 0 ? s * 0x8000 : s * 0x7FFF, true);
         }
 
-        // Convert to base64
         const bytes = new Uint8Array(buffer);
         let binary = '';
-        for (let i = 0; i < bytes.length; i++) {
+        const len = bytes.byteLength;
+        for (let i = 0; i < len; i++) {
             binary += String.fromCharCode(bytes[i]);
         }
 
-        // Use global btoa for base64 encoding
         const base64 = global.btoa ? global.btoa(binary) : Buffer.from(binary, 'binary').toString('base64');
-
         const fileUri = FileSystem.documentDirectory + `callcops_encoded_${Date.now()}.wav`;
-        await FileSystem.writeAsStringAsync(fileUri, base64, {
-            encoding: 'base64',
-        });
-
+        await FileSystem.writeAsStringAsync(fileUri, base64, { encoding: 'base64' });
         return fileUri;
     };
 
-    const handleStartRecording = async () => {
+    const handleStartRecording = () => {
         setErrorMessage(null);
         setUsedOnnx(false);
+        setStatusText('');
+        pcmDataRef.current = [];
 
         if (!permissionGranted) {
             setErrorMessage('마이크 권한이 필요합니다');
@@ -201,17 +193,10 @@ export default function SenderMode({ onBack }) {
         }
 
         try {
-            // Prepare and start recording
-            await audioRecorder.prepareToRecordAsync();
-            audioRecorder.record();
-
+            LiveAudioStream.start();
             setState('recording');
             setRecordingTime(0);
-
-            timerRef.current = setInterval(() => {
-                setRecordingTime(prev => prev + 1);
-            }, 1000);
-
+            timerRef.current = setInterval(() => setRecordingTime(p => p + 1), 1000);
         } catch (err) {
             console.error('Recording error:', err);
             setErrorMessage(`녹음 오류: ${err.message}`);
@@ -219,46 +204,35 @@ export default function SenderMode({ onBack }) {
     };
 
     const handleStopRecording = async () => {
-        if (timerRef.current) {
-            clearInterval(timerRef.current);
-            timerRef.current = null;
-        }
-
-        const duration = recordingTime;
-        setState('encoding');
-        setProgress(0);
+        if (timerRef.current) clearInterval(timerRef.current);
 
         try {
-            // Stop recording
-            await audioRecorder.stop();
-
-            // Wait for file to be written
-            await new Promise(resolve => setTimeout(resolve, 500));
-
-            const recordingUri = audioRecorder.uri;
-            console.log('Recording saved to:', recordingUri);
+            LiveAudioStream.stop();
+            setState('encoding');
+            setStatusText('오디오 데이터 처리 중...');
             setProgress(10);
 
-            // Since expo-audio records in m4a format and we can't decode it in JS,
-            // we'll generate synthetic audio with the same duration for watermarking
-            // In a real app, you'd use a native module for proper audio decoding
-            console.log('Generating audio samples for', duration, 'seconds');
-            const audio8k = generateSyntheticAudio(Math.max(duration, 2));
-            console.log('Generated:', audio8k.length, 'samples at 8kHz');
+            // Wait a moment for last chunks
+            await new Promise(r => setTimeout(r, 200));
+
+            const rawSamples = new Float32Array(pcmDataRef.current);
+            console.log(`Captured ${rawSamples.length} samples at ${TARGET_SAMPLE_RATE}Hz`);
+
+            if (rawSamples.length === 0) throw new Error('녹음된 데이터가 없습니다');
+
+            // Resample
+            const audio8k = resampleTo8kHz(rawSamples);
+            console.log(`Resampled to ${audio8k.length} samples at 8kHz`);
             setProgress(30);
 
-            // Generate message
             const messageBits = generateMessage();
             setBitProbs(messageBits.map(b => b ? 1.0 : 0.0));
-            console.log('Generated 128-bit message');
             setProgress(40);
 
             let encoded;
-
-            // Try ONNX encoder first
             if (inference.onnxAvailable) {
                 try {
-                    console.log('Attempting ONNX encoding...');
+                    setStatusText('ONNX 인코딩 중...');
                     await inference.loadEncoder();
                     setProgress(60);
 
@@ -266,62 +240,58 @@ export default function SenderMode({ onBack }) {
                     encoded = result.encoded;
                     setUsedOnnx(true);
                     console.log('ONNX encoding successful');
-                } catch (onnxErr) {
-                    console.warn('ONNX encoding failed, using fallback:', onnxErr);
+                } catch (e) {
+                    console.warn('ONNX failed:', e);
+                    setStatusText('Fallback 인코딩...');
                     encoded = embedWatermarkSimple(audio8k, messageBits);
                 }
             } else {
-                console.log('ONNX not available, using fallback');
+                setStatusText('Fallback 인코딩...');
                 encoded = embedWatermarkSimple(audio8k, messageBits);
             }
 
             setProgress(80);
-
-            // Save encoded file
-            const fileUri = await createWavFile(encoded);
-            setEncodedUri(fileUri);
-            console.log('Saved to:', fileUri);
+            setStatusText('저장 중...');
+            const uri = await createWavFile(encoded);
+            setEncodedUri(uri);
             setProgress(100);
-
             setState('complete');
 
         } catch (err) {
             console.error('Encoding error:', err);
-            setErrorMessage(`인코딩 오류: ${err.message}`);
+            setErrorMessage(`오류: ${err.message}`);
             setState('idle');
         }
     };
 
     const handleDownload = async () => {
-        if (!encodedUri) return;
-
-        try {
+        if (encodedUri) {
             if (await Sharing.isAvailableAsync()) {
                 await Sharing.shareAsync(encodedUri);
             } else {
-                Alert.alert('공유', `파일이 저장되었습니다:\n${encodedUri}`);
+                Alert.alert('저장됨', encodedUri);
             }
-        } catch (err) {
-            Alert.alert('오류', '파일을 공유할 수 없습니다.');
         }
     };
 
     const handleReset = () => {
-        if (timerRef.current) clearInterval(timerRef.current);
         setState('idle');
         setRecordingTime(0);
         setProgress(0);
         setBitProbs(null);
         setEncodedUri(null);
         setErrorMessage(null);
-        setUsedOnnx(false);
+        pcmDataRef.current = [];
     };
 
     useEffect(() => {
         return () => {
             if (timerRef.current) clearInterval(timerRef.current);
+            LiveAudioStream.stop();
         };
     }, []);
+
+    // ... Render code remains similar, copying styles from previous version for consistency ...
 
     // Render bit matrix preview
     const renderBitMatrix = () => (
@@ -351,7 +321,7 @@ export default function SenderMode({ onBack }) {
                         <Text style={styles.micIcon}>🎤</Text>
                     </View>
                     <Text style={styles.title}>Ready to Call</Text>
-                    <Text style={styles.subtitle}>녹음 시작 후 음성에 워터마크를 삽입합니다</Text>
+                    <Text style={styles.subtitle}>실시간 오디오 스트림을 캡처합니다</Text>
 
                     {!permissionGranted && (
                         <View style={styles.errorBox}>
@@ -367,7 +337,7 @@ export default function SenderMode({ onBack }) {
 
                     {inference.onnxAvailable && (
                         <View style={styles.successBox}>
-                            <Text style={styles.successText}>✓ ONNX 모델 준비됨</Text>
+                            <Text style={styles.successText}>✓ ONNX 모델 & Live Audio 준비됨</Text>
                         </View>
                     )}
 
@@ -394,9 +364,13 @@ export default function SenderMode({ onBack }) {
     if (state === 'recording') {
         return (
             <View style={styles.container}>
+                <TouchableOpacity onPress={onBack} style={styles.backButton}>
+                    <Text style={styles.backText}>← Back</Text>
+                </TouchableOpacity>
+
                 <View style={styles.recordingBadge}>
                     <View style={styles.recordingDot} />
-                    <Text style={styles.recordingText}>Recording</Text>
+                    <Text style={styles.recordingText}>Recording (PCM)</Text>
                 </View>
 
                 <View style={styles.centerContent}>
@@ -419,13 +393,17 @@ export default function SenderMode({ onBack }) {
         );
     }
 
-    // ENCODING STATE
+    // ENCODING & COMPLETE STATES (Same as before)
     if (state === 'encoding') {
         return (
             <View style={styles.container}>
+                <TouchableOpacity onPress={onBack} style={styles.backButton}>
+                    <Text style={styles.backText}>← Back</Text>
+                </TouchableOpacity>
+
                 <View style={styles.centerContent}>
                     <Text style={styles.title}>Encoding Watermark</Text>
-                    <Text style={styles.subtitle}>128-bit 페이로드 삽입 중...</Text>
+                    <Text style={styles.subtitle}>{statusText || '처리 중...'}</Text>
 
                     <View style={styles.progressContainer}>
                         <View style={[styles.progressBar, { width: `${progress}%` }]} />
@@ -438,10 +416,13 @@ export default function SenderMode({ onBack }) {
         );
     }
 
-    // COMPLETE STATE
     if (state === 'complete') {
         return (
             <View style={[styles.container, styles.completeContainer]}>
+                <TouchableOpacity onPress={onBack} style={styles.backButton}>
+                    <Text style={styles.backText}>← Back</Text>
+                </TouchableOpacity>
+
                 <View style={styles.centerContent}>
                     <View style={styles.successCircle}>
                         <Text style={styles.successIcon}>✓</Text>
@@ -449,7 +430,6 @@ export default function SenderMode({ onBack }) {
                     <Text style={styles.successTitle}>Encoding Complete</Text>
                     <Text style={styles.subtitle}>워터마크가 삽입된 오디오 파일이 준비되었습니다</Text>
 
-                    {/* Method Badge */}
                     <View style={[styles.methodBadge, usedOnnx ? styles.onnxBadge : styles.fallbackBadge]}>
                         <Text style={styles.methodText}>
                             {usedOnnx ? '🧠 ONNX Model' : '📊 Fallback'}
