@@ -39,33 +39,67 @@ export function useInference() {
     }, []);
 
     /**
-     * Get local file path for an asset
+     * Get local file path for an asset with verification and retry logic
      */
-    const getAssetLocalUri = useCallback(async (assetModule) => {
-        try {
-            const asset = Asset.fromModule(assetModule);
-            await asset.downloadAsync();
+    const getAssetLocalUri = useCallback(async (assetModule, maxRetries = 3) => {
+        let lastError = null;
 
-            // For Android, we need the local file URI
-            if (asset.localUri) {
-                return asset.localUri;
+        for (let attempt = 1; attempt <= maxRetries; attempt++) {
+            try {
+                const asset = Asset.fromModule(assetModule);
+
+                // Ensure asset is downloaded
+                if (!asset.localUri) {
+                    await asset.downloadAsync();
+                }
+
+                // Check if localUri is now available
+                if (asset.localUri) {
+                    // Verify the file actually exists
+                    const info = await FileSystem.getInfoAsync(asset.localUri);
+                    if (info.exists && info.size > 0) {
+                        console.log(`Asset loaded (attempt ${attempt}):`, asset.localUri);
+                        return asset.localUri;
+                    }
+                }
+
+                // Fallback: copy to document directory
+                const fileName = `${asset.name || 'model'}.${asset.type || 'onnx'}`;
+                const destPath = FileSystem.documentDirectory + fileName;
+
+                // Check if already copied and valid
+                const destInfo = await FileSystem.getInfoAsync(destPath);
+                if (destInfo.exists && destInfo.size > 0) {
+                    console.log(`Using cached asset (attempt ${attempt}):`, destPath);
+                    return destPath;
+                }
+
+                // Download from asset URI
+                if (asset.uri) {
+                    console.log(`Downloading asset to cache (attempt ${attempt})...`);
+                    await FileSystem.downloadAsync(asset.uri, destPath);
+
+                    // Verify download
+                    const verifyInfo = await FileSystem.getInfoAsync(destPath);
+                    if (verifyInfo.exists && verifyInfo.size > 0) {
+                        console.log('Asset downloaded and verified:', destPath);
+                        return destPath;
+                    }
+                }
+
+                throw new Error('Asset not available after download');
+            } catch (err) {
+                lastError = err;
+                console.warn(`Asset loading attempt ${attempt} failed:`, err.message);
+
+                if (attempt < maxRetries) {
+                    // Wait before retry (exponential backoff)
+                    await new Promise(resolve => setTimeout(resolve, 200 * attempt));
+                }
             }
-
-            // Fallback: copy to document directory
-            const fileName = asset.name + (asset.type ? '.' + asset.type : '');
-            const destPath = FileSystem.documentDirectory + fileName;
-
-            // Check if already copied
-            const fileInfo = await FileSystem.getInfoAsync(destPath);
-            if (!fileInfo.exists) {
-                await FileSystem.downloadAsync(asset.uri, destPath);
-            }
-
-            return destPath;
-        } catch (err) {
-            console.error('Asset loading error:', err);
-            throw err;
         }
+
+        throw new Error(`Failed to load asset after ${maxRetries} attempts: ${lastError?.message}`);
     }, []);
 
     /**
@@ -119,7 +153,7 @@ export function useInference() {
         }
 
         if (encoderSessionRef.current) {
-            return;
+            return encoderSessionRef.current;
         }
 
         setIsLoading(true);
@@ -139,6 +173,8 @@ export function useInference() {
             console.log('Encoder loaded successfully');
             console.log('Input names:', session.inputNames);
             console.log('Output names:', session.outputNames);
+
+            return session;
         } catch (err) {
             console.error('Failed to load encoder:', err);
             setError(`Failed to load encoder: ${err.message}`);
@@ -309,6 +345,9 @@ export function useInference() {
         runDecoder,
         runEncoder,
         resampleTo8kHz,
+        encoderSession: encoderSessionRef.current,
+        decoderSession: decoderSessionRef.current,
+        Tensor,
     };
 }
 

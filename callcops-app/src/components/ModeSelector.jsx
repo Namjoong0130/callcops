@@ -19,7 +19,7 @@ export default function ModeSelector({ onSelectMode }) {
             {/* Header */}
             <View style={styles.header}>
                 <View style={styles.iconCircle}>
-                    <Ionicons name="call" size={40} color="#fff" />
+                    <Ionicons name="shield-checkmark" size={40} color="#fff" />
                 </View>
                 <Text style={styles.title}>CallCops</Text>
                 <Text style={styles.subtitle}>통화 인증 시스템</Text>
@@ -49,7 +49,7 @@ export default function ModeSelector({ onSelectMode }) {
                     activeOpacity={0.8}
                 >
                     <View style={[styles.modeIcon, styles.receiverIcon]}>
-                        <Ionicons name="shield-checkmark" size={28} color="#fff" />
+                        <Ionicons name="call" size={28} color="#fff" />
                     </View>
                     <View style={styles.modeInfo}>
                         <Text style={styles.modeTitle}>수신자 모드</Text>

@@ -42,9 +42,11 @@ export default function SenderMode({ onBack }) {
   const [inputWaveform, setInputWaveform] = useState(new Array(30).fill(0));
   const [outputWaveform, setOutputWaveform] = useState(new Array(30).fill(0));
   const [currentBitIndex, setCurrentBitIndex] = useState(0);
+  const [animationTick, setAnimationTick] = useState(0); // For continuous animation
 
   const inference = useInference();
   const timerRef = useRef(null);
+  const animationTimerRef = useRef(null); // For bit grid animation
 
   // Streaming encoder wrapper (holds ONNX session + state)
   const streamingEncoderRef = useRef(null);
@@ -267,30 +269,23 @@ export default function SenderMode({ onBack }) {
         channels: 1,
         bitsPerSample: 16,
         audioSource: 1, // MIC - Raw microphone without voice processing
-        bufferSize: FRAME_SAMPLES, // 320 samples = 40ms @ 8kHz
+        bufferSize: FRAME_SAMPLES * 10, // 3200 samples = 400ms @ 8kHz (batch processing)
       });
 
-      // Frame-by-frame processing callback
-      LiveAudioStream.on('data', async (base64Data) => {
+      // Non-blocking audio collection callback
+      // Key insight: Don't await ONNX inside the audio callback!
+      // Just collect samples quickly, process encoding separately
+      let isProcessing = false;
+
+      const processEncodingQueue = async () => {
+        if (isProcessing) return;
+        isProcessing = true;
+
         try {
-          if (!base64Data) return;
-
-          // Decode base64 to Buffer
-          const pcmBuffer = Buffer.from(base64Data, 'base64');
-          if (!pcmBuffer || pcmBuffer.length === 0) return;
-
-          // Convert Int16 PCM to Float32 [-1, 1]
-          const numSamples = Math.floor(pcmBuffer.length / 2);
-          for (let i = 0; i < numSamples; i++) {
-            const sample = pcmBuffer.readInt16LE(i * 2) / 32768.0;
-            inputBufferRef.current.push(sample);  // Regular Array supports push()
-          }
-
-          // Process complete frames (320 samples each)
+          // Process all available frames
           while (inputBufferRef.current.length >= FRAME_SAMPLES) {
-            // Extract frame using splice() - works on regular Array
             const frameArray = inputBufferRef.current.splice(0, FRAME_SAMPLES);
-            const frame = new Float32Array(frameArray);  // Convert to Float32Array for processing
+            const frame = new Float32Array(frameArray);
 
             let encodedFrame;
             const bitIdx = frameCountRef.current % PAYLOAD_LENGTH;
@@ -303,7 +298,6 @@ export default function SenderMode({ onBack }) {
                   messageBitsRef.current
                 );
               } catch (e) {
-                console.warn('ONNX encoding failed:', e.message);
                 encodedFrame = null;
               }
             }
@@ -320,11 +314,9 @@ export default function SenderMode({ onBack }) {
 
             frameCountRef.current++;
 
-            // Update visualization (every 4 frames)
-            if (frameCountRef.current % 4 === 0) {
+            // Update visualization (every 2 frames for faster movement)
+            if (frameCountRef.current % 2 === 0) {
               setCurrentBitIndex(bitIdx);
-
-              // RMS amplitude for visualization
               let inputSum = 0, outputSum = 0;
               for (let i = 0; i < frame.length; i++) {
                 inputSum += frame[i] * frame[i];
@@ -332,11 +324,34 @@ export default function SenderMode({ onBack }) {
               }
               const inputAmp = Math.sqrt(inputSum / frame.length);
               const outputAmp = Math.sqrt(outputSum / encodedFrame.length);
-
               setInputWaveform(prev => [...prev.slice(1), inputAmp * 5]);
               setOutputWaveform(prev => [...prev.slice(1), outputAmp * 5]);
             }
           }
+        } finally {
+          isProcessing = false;
+        }
+      };
+
+      // Audio data callback - just collect, don't block!
+      LiveAudioStream.on('data', (base64Data) => {
+        try {
+          if (!base64Data) return;
+
+          // Decode base64 to Buffer
+          const pcmBuffer = Buffer.from(base64Data, 'base64');
+          if (!pcmBuffer || pcmBuffer.length === 0) return;
+
+          // Convert Int16 PCM to Float32 [-1, 1] - fast operation
+          const numSamples = Math.floor(pcmBuffer.length / 2);
+          for (let i = 0; i < numSamples; i++) {
+            const sample = pcmBuffer.readInt16LE(i * 2) / 32768.0;
+            inputBufferRef.current.push(sample);
+          }
+
+          // Trigger encoding processing (non-blocking)
+          // Use setTimeout to defer to next event loop tick
+          setTimeout(processEncodingQueue, 0);
         } catch (e) {
           console.warn('Audio chunk error:', e.message || e);
         }
@@ -346,6 +361,12 @@ export default function SenderMode({ onBack }) {
       setState('recording');
       setRecordingTime(0);
       timerRef.current = setInterval(() => setRecordingTime(p => p + 1), 1000);
+
+      // Animation timer for smooth bit grid animation (40ms per bit = 25fps)
+      animationTimerRef.current = setInterval(() => {
+        setAnimationTick(t => t + 1);
+      }, 40);
+
       console.log(`Real-time encoding started (${useOnnxRef.current ? 'ONNX' : 'fallback'})`);
 
     } catch (err) {
@@ -356,6 +377,7 @@ export default function SenderMode({ onBack }) {
 
   const handleStopRecording = async () => {
     if (timerRef.current) clearInterval(timerRef.current);
+    if (animationTimerRef.current) clearInterval(animationTimerRef.current);
 
     try {
       console.log('Stopping real-time recording...');
@@ -410,21 +432,45 @@ export default function SenderMode({ onBack }) {
     streamingEncoderRef.current = null;
   };
 
-  // Render bit matrix preview
-  const renderBitMatrix = () => (
-    <View style={styles.bitMatrix}>
-      {(bitProbs || Array(128).fill(0.5)).map((prob, i) => (
-        <View
-          key={i}
-          style={[
-            styles.bit,
-            { backgroundColor: prob > 0.5 ? '#22c55e' : '#ef4444' },
-            i === currentBitIndex && state === 'recording' && styles.currentBit
-          ]}
-        />
-      ))}
-    </View>
-  );
+  // Render 16x8 bit matrix with time-based animation
+  const renderBitMatrix = () => {
+    const ROWS = 8;
+    const COLS = 16;
+
+    // Animation active during both recording and encoding states
+    const showAnimation = state === 'recording' || state === 'encoding';
+
+    // Calculate animated bit index based on time (cycles through 128 bits)
+    // Each bit is highlighted for about 40ms, so 25 bits per second
+    const animatedBitIdx = showAnimation
+      ? Math.floor((Date.now() / 40) % 128)
+      : currentBitIndex;
+
+    return (
+      <View style={styles.bitMatrixContainer}>
+        {Array.from({ length: ROWS }).map((_, row) => (
+          <View key={row} style={styles.bitRow}>
+            {Array.from({ length: COLS }).map((_, col) => {
+              const bitIdx = row * COLS + col;
+              const bitValue = messageBitsRef.current ? messageBitsRef.current[bitIdx] : 0;
+              const isActive = bitIdx === animatedBitIdx && showAnimation;
+
+              return (
+                <View
+                  key={col}
+                  style={[
+                    styles.bitCell,
+                    { backgroundColor: bitValue > 0.5 ? '#FFFFFF' : '#000000' },
+                    isActive && styles.activeBitCell
+                  ]}
+                />
+              );
+            })}
+          </View>
+        ))}
+      </View>
+    );
+  };
 
   // IDLE STATE
   if (state === 'idle') {
@@ -493,57 +539,46 @@ export default function SenderMode({ onBack }) {
           start={{ x: 0, y: 0 }}
           end={{ x: 1, y: 1 }}
         />
-        <TouchableOpacity onPress={onBack} style={styles.backButton}>
-          <Text style={styles.backText}>← Back</Text>
-        </TouchableOpacity>
 
-        <View style={styles.recordingBadge}>
-          <View style={styles.recordingDot} />
-          <Text style={styles.recordingText}>
-            Real-time Encoding {usedOnnx ? '(ONNX)' : '(Fallback)'}
-          </Text>
-        </View>
+
+
 
         <View style={styles.centerContent}>
           <Text style={styles.timer}>{formatTime(recordingTime)}</Text>
 
+          <View style={styles.recordingBadge}>
+            <View style={styles.recordingDot} />
+            <Text style={styles.recordingText}>
+              Real-time Encoding {usedOnnx ? '(ONNX)' : '(Fallback)'}
+            </Text>
+          </View>
+
           <Text style={styles.waveformLabel}>Input Audio</Text>
-          <View style={styles.waveform}>
+          <View style={styles.waveformContainer}>
             {inputWaveform.map((amp, i) => (
               <View
                 key={`in-${i}`}
-                style={[styles.waveBar, styles.inputWaveBar, { height: Math.max(4, amp * 150) }]}
+                style={[styles.waveBar, styles.inputWaveBar, { height: Math.min(50, Math.max(4, amp * 150)) }]}
               />
             ))}
           </View>
 
           <Text style={styles.waveformLabel}>Bit Matrix ({currentBitIndex}/128)</Text>
-          <View style={styles.bitMatrix}>
-            {(bitProbs || Array(128).fill(0.5)).map((prob, i) => (
-              <View
-                key={i}
-                style={[
-                  styles.bit,
-                  { backgroundColor: prob > 0.5 ? '#22c55e' : '#ef4444' },
-                  i === currentBitIndex && styles.currentBit
-                ]}
-              />
-            ))}
-          </View>
+          {renderBitMatrix()}
 
           <Text style={styles.waveformLabel}>Encoded Audio</Text>
-          <View style={styles.waveform}>
+          <View style={styles.waveformContainer}>
             {outputWaveform.map((amp, i) => (
               <View
                 key={`out-${i}`}
-                style={[styles.waveBar, styles.outputWaveBar, { height: Math.max(4, amp * 150) }]}
+                style={[styles.waveBar, styles.outputWaveBar, { height: Math.min(50, Math.max(4, amp * 150)) }]}
               />
             ))}
           </View>
         </View>
 
         <TouchableOpacity onPress={handleStopRecording} style={styles.stopButton}>
-          <View style={styles.stopIcon} />
+          <Ionicons name="call" size={36} color="#ffffff" style={{ transform: [{ rotate: '135deg' }] }} />
         </TouchableOpacity>
         <Text style={styles.stopLabel}>Stop Recording</Text>
       </View>
@@ -560,9 +595,7 @@ export default function SenderMode({ onBack }) {
           start={{ x: 0, y: 0 }}
           end={{ x: 1, y: 1 }}
         />
-        <TouchableOpacity onPress={onBack} style={styles.backButton}>
-          <Text style={styles.backText}>← Back</Text>
-        </TouchableOpacity>
+
 
         <View style={styles.centerContent}>
           <Text style={styles.title}>Encoding Watermark</Text>
@@ -644,8 +677,10 @@ const styles = StyleSheet.create({
   },
   centerContent: {
     flex: 1,
-    justifyContent: 'center',
+    flex: 1,
+    justifyContent: 'flex-start', // Move content to top
     alignItems: 'center',
+    paddingTop: 60, // Add space from top
   },
   micCircle: {
     width: 128,
@@ -730,6 +765,7 @@ const styles = StyleSheet.create({
     borderRadius: 16,
     borderWidth: 1,
     borderColor: 'rgba(239, 68, 68, 0.3)',
+    marginBottom: 24, // Add spacing below badge before waveforms
   },
   recordingDot: {
     width: 8,
@@ -747,16 +783,24 @@ const styles = StyleSheet.create({
     fontWeight: 'bold',
     color: '#fff',
     fontFamily: 'monospace',
-    marginBottom: 32,
+    marginBottom: 8, // Reduced from 32 to 8 for tighter spacing
   },
-  waveform: {
+  waveformContainer: {
+    height: 60,
     flexDirection: 'row',
     alignItems: 'center',
-    gap: 4,
+    justifyContent: 'flex-start', // Move waveforms to left
+    gap: 3,
+    backgroundColor: 'rgba(55, 65, 81, 0.3)', // Dark frame background
+    borderRadius: 8,
+    paddingHorizontal: 12,
+    borderWidth: 1,
+    borderColor: 'rgba(255, 255, 255, 0.1)',
+    width: '100%',
+    marginBottom: 8,
   },
   waveBar: {
     width: 6,
-    backgroundColor: '#22c55e',
     borderRadius: 3,
   },
   inputWaveBar: {
@@ -773,12 +817,7 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     justifyContent: 'center',
   },
-  stopIcon: {
-    width: 28,
-    height: 28,
-    backgroundColor: '#fff',
-    borderRadius: 4,
-  },
+
   stopLabel: {
     color: '#f87171',
     fontSize: 14,
@@ -820,6 +859,36 @@ const styles = StyleSheet.create({
     borderWidth: 2,
     borderColor: '#fff',
     transform: [{ scale: 1.3 }],
+  },
+  // New 16x8 grid styles
+  bitMatrixContainer: {
+    borderWidth: 3,
+    borderColor: '#00FFFF', // Cyan border for visibility
+    borderRadius: 12,
+    padding: 6,
+    backgroundColor: 'rgba(0, 0, 0, 0.5)',
+    marginTop: 16,
+  },
+  bitRow: {
+    flexDirection: 'row',
+    gap: 2,
+    marginBottom: 2,
+  },
+  bitCell: {
+    width: 14,
+    height: 14,
+    borderRadius: 2,
+    borderWidth: 1,
+    borderColor: 'rgba(100, 100, 100, 0.5)',
+  },
+  activeBitCell: {
+    borderWidth: 2,
+    borderColor: '#FF00FF', // Magenta highlight for active bit
+    transform: [{ scale: 1.2 }],
+    shadowColor: '#FF00FF',
+    shadowOffset: { width: 0, height: 0 },
+    shadowOpacity: 0.8,
+    shadowRadius: 6,
   },
   waveformLabel: {
     color: '#d1d5db',

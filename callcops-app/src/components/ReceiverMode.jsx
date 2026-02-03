@@ -611,47 +611,53 @@ export default function ReceiverMode({ onBack }) {
         const accumulatedData = bitProbs ? Array.from(bitProbs) : new Array(128).fill(-1);
 
         const renderGrid = (data, isInstant) => {
+            const ROWS = 8;
+            const COLS = 16;
+
             return (
                 <View style={styles.gridWrapper}>
                     <Text style={styles.gridLabel}>{isInstant ? 'Real-time Signal (Instant)' : 'Accumulated Result (Final)'}</Text>
                     <View style={styles.gridContainer}>
-                        {data.map((prob, i) => {
-                            let bgColor;
-                            if (isInstant) {
-                                if (prob === -1) bgColor = '#1f2937'; // Dim (Unknown)
-                                else {
-                                    // Grayscale mapping
-                                    const val = Math.floor(prob * 255);
-                                    bgColor = `rgb(${val}, ${val}, ${val})`;
-                                }
-                            } else {
-                                // Accumulated: Binary Threshold (or dim if not yet detected)
-                                if (prob === -1 || prob === null || prob === undefined) {
-                                    bgColor = '#1f2937'; // Dim (Unknown)
-                                } else {
-                                    bgColor = prob > 0.5 ? '#ffffff' : '#000000';
-                                }
-                            }
+                        {Array.from({ length: ROWS }).map((_, row) => (
+                            <View key={row} style={styles.gridRow}>
+                                {Array.from({ length: COLS }).map((_, col) => {
+                                    const i = row * COLS + col;
+                                    const prob = data[i];
 
-                            const isActive = activeIndices.has(i);
-                            // If it's result page, we DO NOT show the cyan active border
-                            const showActiveBorder = isActive && !isResult;
-
-                            return (
-                                <View
-                                    key={i}
-                                    style={[
-                                        styles.gridBit,
-                                        {
-                                            backgroundColor: bgColor,
-                                            borderColor: showActiveBorder ? '#00ffff' : '#374151',
-                                            borderWidth: showActiveBorder ? 2 : 0.5,
-                                            zIndex: showActiveBorder ? 10 : 1
+                                    let bgColor;
+                                    if (isInstant) {
+                                        if (prob === -1) bgColor = '#1f2937';
+                                        else {
+                                            const val = Math.floor(prob * 255);
+                                            bgColor = `rgb(${val}, ${val}, ${val})`;
                                         }
-                                    ]}
-                                />
-                            );
-                        })}
+                                    } else {
+                                        if (prob === -1 || prob === null || prob === undefined) {
+                                            bgColor = '#1f2937';
+                                        } else {
+                                            bgColor = prob > 0.5 ? '#ffffff' : '#000000';
+                                        }
+                                    }
+
+                                    const isActive = activeIndices.has(i);
+                                    const showActiveBorder = isActive && !isResult;
+
+                                    return (
+                                        <View
+                                            key={col}
+                                            style={[
+                                                styles.gridBit,
+                                                {
+                                                    backgroundColor: bgColor,
+                                                    borderColor: showActiveBorder ? '#00ffff' : '#374151',
+                                                    borderWidth: showActiveBorder ? 2 : 0.5,
+                                                }
+                                            ]}
+                                        />
+                                    );
+                                })}
+                            </View>
+                        ))}
                     </View>
                 </View>
             );
@@ -674,33 +680,43 @@ export default function ReceiverMode({ onBack }) {
             ? (currentChunkProbs ? Array.from(currentChunkProbs) : new Array(128).fill(-1))
             : (bitProbs ? Array.from(bitProbs) : new Array(128).fill(-1));
 
+        const ROWS = 8;
+        const COLS = 16;
+
         return (
             <View style={styles.miniMatrixGrid}>
-                {data.map((prob, i) => {
-                    let bgColor = '#1f2937'; // Unknown
-                    if (prob !== -1 && prob !== null) {
-                        if (isInstant) {
-                            const val = Math.floor(prob * 255);
-                            bgColor = `rgb(${val}, ${val}, ${val})`;
-                        } else {
-                            bgColor = prob > 0.5 ? '#ffffff' : '#000';
-                        }
-                    }
-                    const isActive = activeIndices.has(i);
-                    return (
-                        <View
-                            key={i}
-                            style={[
-                                styles.miniGridBit,
-                                {
-                                    backgroundColor: bgColor,
-                                    borderColor: isActive ? '#00ffff' : 'rgba(255,255,255,0.05)',
-                                    borderWidth: isActive ? 1 : 0.2,
+                {Array.from({ length: ROWS }).map((_, row) => (
+                    <View key={row} style={styles.miniMatrixRow}>
+                        {Array.from({ length: COLS }).map((_, col) => {
+                            const i = row * COLS + col;
+                            const prob = data[i];
+
+                            let bgColor = '#1f2937'; // Unknown
+                            if (prob !== -1 && prob !== null) {
+                                if (isInstant) {
+                                    const val = Math.floor(prob * 255);
+                                    bgColor = `rgb(${val}, ${val}, ${val})`;
+                                } else {
+                                    bgColor = prob > 0.5 ? '#ffffff' : '#000';
                                 }
-                            ]}
-                        />
-                    );
-                })}
+                            }
+                            const isActive = activeIndices.has(i);
+                            return (
+                                <View
+                                    key={col}
+                                    style={[
+                                        styles.miniGridBit,
+                                        {
+                                            backgroundColor: bgColor,
+                                            borderColor: isActive ? '#00ffff' : 'rgba(255,255,255,0.05)',
+                                            borderWidth: isActive ? 1 : 0.2,
+                                        }
+                                    ]}
+                                />
+                            );
+                        })}
+                    </View>
+                ))}
             </View>
         );
     };
@@ -1448,6 +1464,7 @@ const styles = StyleSheet.create({
     dualMatrixContainer: {
         marginTop: 24,
         alignItems: 'center',
+        marginHorizontal: -24, // Counteract parent paddingHorizontal
     },
     gridWrapper: {
         alignItems: 'center',
@@ -1459,15 +1476,17 @@ const styles = StyleSheet.create({
         fontWeight: '600',
     },
     gridContainer: {
+        // No more flexWrap - using explicit rows
+    },
+    gridRow: {
         flexDirection: 'row',
-        flexWrap: 'wrap',
-        width: 224, // 16 cols * (12px + 2px gap)
-        gap: 2,
+        gap: 1,
+        marginBottom: 1,
     },
     gridBit: {
-        width: 12,
-        height: 12,
-        borderRadius: 2,
+        width: 10,
+        height: 10,
+        borderRadius: 1,
     },
     spacer: {
         height: 24,
@@ -1925,14 +1944,17 @@ const styles = StyleSheet.create({
         letterSpacing: 0.5,
     },
     miniMatrixGrid: {
+        alignItems: 'center', // Center the grid
+    },
+    miniMatrixRow: {
         flexDirection: 'row',
-        flexWrap: 'wrap',
-        width: '100%',
-        aspectRatio: 2, // 16x8 feel
+        gap: 1,
+        marginBottom: 1,
     },
     miniGridBit: {
-        width: '6.25%', // 100/16
-        height: '12.5%', // 100/8
+        width: 18,
+        height: 18,
+        borderRadius: 2,
     },
     miniMatrixContainerV2: {
         marginTop: 20,
