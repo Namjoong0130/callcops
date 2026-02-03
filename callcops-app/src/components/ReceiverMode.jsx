@@ -1071,11 +1071,6 @@ export default function ReceiverMode({ onBack }) {
                             </Text>
 
                             {/* Method Badge */}
-                            <View style={[styles.methodBadge, usedOnnx ? styles.onnxBadge : styles.fallbackBadge]}>
-                                <Text style={styles.methodText}>
-                                    {usedOnnx ? '🧠 ONNX Model' : '📊 Fallback'}
-                                </Text>
-                            </View>
 
                             {/* Main Status Summary */}
                             <View style={[styles.summaryBadge, isValid ? styles.validBadge : styles.invalidBadge]}>
@@ -1406,6 +1401,8 @@ const styles = StyleSheet.create({
     },
     validBadge: {
         backgroundColor: 'rgba(34, 197, 94, 0.1)',
+        borderWidth: 1,
+        borderColor: '#22c55e',
     },
     invalidBadge: {
         backgroundColor: 'rgba(239, 68, 68, 0.1)',

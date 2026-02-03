@@ -4,6 +4,8 @@
  */
 import React, { useState, useRef, useEffect } from 'react';
 import { View, Text, TouchableOpacity, StyleSheet, Alert, Platform, PermissionsAndroid } from 'react-native';
+import { LinearGradient } from 'expo-linear-gradient';
+import { Ionicons } from '@expo/vector-icons';
 import LiveAudioStream from 'react-native-live-audio-stream';
 import { Audio } from 'expo-av'; // For permission only
 import * as FileSystem from 'expo-file-system/legacy';
@@ -396,13 +398,19 @@ export default function SenderMode({ onBack }) {
     if (state === 'idle') {
         return (
             <View style={styles.container}>
+                <LinearGradient
+                    colors={['#7c2d12', '#831843', '#2e1065']}
+                    style={StyleSheet.absoluteFill}
+                    start={{ x: 0, y: 0 }}
+                    end={{ x: 1, y: 1 }}
+                />
                 <TouchableOpacity onPress={onBack} style={styles.backButton}>
                     <Text style={styles.backText}>← Back</Text>
                 </TouchableOpacity>
 
                 <View style={styles.centerContent}>
                     <View style={styles.micCircle}>
-                        <Text style={styles.micIcon}>🎤</Text>
+                        <Ionicons name="mic" size={48} color="#fff" />
                     </View>
                     <Text style={styles.title}>Ready to Call</Text>
                     <Text style={styles.subtitle}>실시간 오디오 스트림을 캡처합니다</Text>
@@ -437,9 +445,8 @@ export default function SenderMode({ onBack }) {
                     style={[styles.startButton, !permissionGranted && styles.disabledButton]}
                     disabled={!permissionGranted}
                 >
-                    <Text style={styles.startButtonIcon}>📞</Text>
+                    <Ionicons name="call" size={36} color="#22c55e" />
                 </TouchableOpacity>
-                <Text style={styles.startLabel}>Start Recording</Text>
             </View>
         );
     }
@@ -448,6 +455,12 @@ export default function SenderMode({ onBack }) {
     if (state === 'recording') {
         return (
             <View style={styles.container}>
+                <LinearGradient
+                    colors={['#7c2d12', '#831843', '#2e1065']}
+                    style={StyleSheet.absoluteFill}
+                    start={{ x: 0, y: 0 }}
+                    end={{ x: 1, y: 1 }}
+                />
                 <TouchableOpacity onPress={onBack} style={styles.backButton}>
                     <Text style={styles.backText}>← Back</Text>
                 </TouchableOpacity>
@@ -481,6 +494,12 @@ export default function SenderMode({ onBack }) {
     if (state === 'encoding') {
         return (
             <View style={styles.container}>
+                <LinearGradient
+                    colors={['#7c2d12', '#831843', '#2e1065']}
+                    style={StyleSheet.absoluteFill}
+                    start={{ x: 0, y: 0 }}
+                    end={{ x: 1, y: 1 }}
+                />
                 <TouchableOpacity onPress={onBack} style={styles.backButton}>
                     <Text style={styles.backText}>← Back</Text>
                 </TouchableOpacity>
@@ -503,6 +522,12 @@ export default function SenderMode({ onBack }) {
     if (state === 'complete') {
         return (
             <View style={[styles.container, styles.completeContainer]}>
+                <LinearGradient
+                    colors={['#7c2d12', '#831843', '#2e1065']}
+                    style={StyleSheet.absoluteFill}
+                    start={{ x: 0, y: 0 }}
+                    end={{ x: 1, y: 1 }}
+                />
                 <TouchableOpacity onPress={onBack} style={styles.backButton}>
                     <Text style={styles.backText}>← Back</Text>
                 </TouchableOpacity>
@@ -631,7 +656,7 @@ const styles = StyleSheet.create({
         width: 80,
         height: 80,
         borderRadius: 40,
-        backgroundColor: '#22c55e',
+        backgroundColor: '#ffffff', // White background
         alignItems: 'center',
         justifyContent: 'center',
     },

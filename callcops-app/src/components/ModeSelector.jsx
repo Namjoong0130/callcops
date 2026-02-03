@@ -3,14 +3,23 @@
  */
 import React from 'react';
 import { View, Text, TouchableOpacity, StyleSheet } from 'react-native';
+import { LinearGradient } from 'expo-linear-gradient';
+import { Ionicons } from '@expo/vector-icons';
 
 export default function ModeSelector({ onSelectMode }) {
     return (
         <View style={styles.container}>
+            <LinearGradient
+                colors={['#7c2d12', '#831843', '#2e1065']} // Call Screen Theme
+                style={StyleSheet.absoluteFill}
+                start={{ x: 0, y: 0 }}
+                end={{ x: 1, y: 1 }}
+            />
+
             {/* Header */}
             <View style={styles.header}>
                 <View style={styles.iconCircle}>
-                    <Text style={styles.iconText}>📞</Text>
+                    <Ionicons name="call" size={40} color="#fff" />
                 </View>
                 <Text style={styles.title}>CallCops</Text>
                 <Text style={styles.subtitle}>통화 인증 시스템</Text>
@@ -25,13 +34,12 @@ export default function ModeSelector({ onSelectMode }) {
                     activeOpacity={0.8}
                 >
                     <View style={[styles.modeIcon, styles.senderIcon]}>
-                        <Text style={styles.modeIconText}>✨</Text>
+                        <Ionicons name="mic" size={28} color="#fff" />
                     </View>
                     <View style={styles.modeInfo}>
                         <Text style={styles.modeTitle}>송신자 모드</Text>
                         <Text style={styles.modeDesc}>음성 녹음 → 워터마크 삽입 → 다운로드</Text>
                     </View>
-                    <Text style={styles.arrow}>›</Text>
                 </TouchableOpacity>
 
                 {/* Receiver Mode */}
@@ -41,13 +49,12 @@ export default function ModeSelector({ onSelectMode }) {
                     activeOpacity={0.8}
                 >
                     <View style={[styles.modeIcon, styles.receiverIcon]}>
-                        <Text style={styles.modeIconText}>🛡️</Text>
+                        <Ionicons name="shield-checkmark" size={28} color="#fff" />
                     </View>
                     <View style={styles.modeInfo}>
                         <Text style={styles.modeTitle}>수신자 모드</Text>
                         <Text style={styles.modeDesc}>파일 업로드 → 워터마크 검증 → 발신자 확인</Text>
                     </View>
-                    <Text style={styles.arrow}>›</Text>
                 </TouchableOpacity>
             </View>
 
@@ -73,13 +80,12 @@ const styles = StyleSheet.create({
         width: 80,
         height: 80,
         borderRadius: 40,
-        backgroundColor: '#3b82f6',
+        backgroundColor: 'rgba(255, 255, 255, 0.1)', // Transparent White
         alignItems: 'center',
         justifyContent: 'center',
         marginBottom: 24,
-    },
-    iconText: {
-        fontSize: 36,
+        borderWidth: 1,
+        borderColor: 'rgba(255, 255, 255, 0.2)',
     },
     title: {
         fontSize: 32,
@@ -89,7 +95,7 @@ const styles = StyleSheet.create({
     },
     subtitle: {
         fontSize: 16,
-        color: '#9ca3af',
+        color: '#d1d5db', // Lighter Gray
     },
     buttons: {
         width: '100%',
@@ -103,12 +109,12 @@ const styles = StyleSheet.create({
         borderWidth: 1,
     },
     senderButton: {
-        backgroundColor: 'rgba(34, 197, 94, 0.1)',
-        borderColor: 'rgba(34, 197, 94, 0.3)',
+        backgroundColor: 'rgba(74, 222, 128, 0.1)', // Brighter Green (400)
+        borderColor: 'rgba(255, 255, 255, 0.4)', // White Border
     },
     receiverButton: {
-        backgroundColor: 'rgba(59, 130, 246, 0.1)',
-        borderColor: 'rgba(59, 130, 246, 0.3)',
+        backgroundColor: 'rgba(96, 165, 250, 0.1)', // Brighter Blue (400)
+        borderColor: 'rgba(255, 255, 255, 0.4)', // White Border
     },
     modeIcon: {
         width: 56,
@@ -119,10 +125,10 @@ const styles = StyleSheet.create({
         marginRight: 16,
     },
     senderIcon: {
-        backgroundColor: 'rgba(34, 197, 94, 0.2)',
+        backgroundColor: 'rgba(74, 222, 128, 0.2)', // Brighter Green
     },
     receiverIcon: {
-        backgroundColor: 'rgba(59, 130, 246, 0.2)',
+        backgroundColor: 'rgba(96, 165, 250, 0.2)', // Brighter Blue
     },
     modeIconText: {
         fontSize: 24,
@@ -137,16 +143,13 @@ const styles = StyleSheet.create({
         marginBottom: 4,
     },
     modeDesc: {
-        fontSize: 12,
-        color: '#9ca3af',
+        fontSize: 12, // Reduced size
+        color: '#e5e7eb', // Lighter Gray
     },
-    arrow: {
-        fontSize: 24,
-        color: '#6b7280',
-    },
+    // Arrow style removed
     footer: {
         marginTop: 48,
         fontSize: 12,
-        color: '#6b7280',
+        color: '#d1d5db', // Lighter Gray (Gray-300)
     },
 });
