@@ -891,6 +891,11 @@ class CausalStreamingEncoder:
 
         Returns:
             watermarked: [320] 워터마크된 오디오
+        
+        Note:
+            메시지 회전(cyclic bit alignment)은 Encoder 내부의
+            CausalFrameWiseFusionBlock에서 자동으로 처리됩니다.
+            따라서 여기서는 원본 메시지를 그대로 전달합니다.
         """
         device = next(self.encoder.parameters()).device
 
@@ -899,12 +904,8 @@ class CausalStreamingEncoder:
         if message.dim() == 1:
             message = message.unsqueeze(0).to(device)
 
-        # 메시지 회전 (cyclic bit alignment)
-        offset = self._frame_index % PAYLOAD_LENGTH
-        rotated = torch.roll(message, -offset, dims=-1)
-
-        # 직접 인코딩!
-        watermarked = self.encoder(frame, rotated)
+        # 직접 인코딩! (메시지 회전은 Encoder 내부에서 처리)
+        watermarked = self.encoder(frame, message)
 
         self._frame_index += 1
         return watermarked.squeeze()
