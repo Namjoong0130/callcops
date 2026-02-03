@@ -35,6 +35,20 @@ from .streaming import (
     validate_streaming_vs_batch,
 )
 
+# Causal Architecture (Zero Look-ahead)
+from .rtaw_net_causal import (
+    CausalCallCopsNet,
+    CausalEncoder,
+    CausalDecoder,
+    CausalDiscriminator,
+    CausalConvBlock,
+    CausalResidualBlock,
+    CausalFrameWiseFusionBlock,
+    CausalFrameWiseBitExtractor,
+    CausalStreamingEncoder,
+    calculate_receptive_field,
+)
+
 from .losses import (
     CallCopsLoss,
     CallShieldLoss,
@@ -70,6 +84,17 @@ __all__ = [
     # Streaming
     "StreamingEncoderWrapper",
     "validate_streaming_vs_batch",
+    # Causal Architecture
+    "CausalCallCopsNet",
+    "CausalEncoder",
+    "CausalDecoder",
+    "CausalDiscriminator",
+    "CausalConvBlock",
+    "CausalResidualBlock",
+    "CausalFrameWiseFusionBlock",
+    "CausalFrameWiseBitExtractor",
+    "CausalStreamingEncoder",
+    "calculate_receptive_field",
     # Losses
     "CallCopsLoss",
     "CallShieldLoss",
