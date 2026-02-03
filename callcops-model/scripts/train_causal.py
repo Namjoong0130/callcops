@@ -598,6 +598,14 @@ def main():
     parser.add_argument('--device', type=str, default='auto')
     parser.add_argument('--num_workers', type=int, default=4)
     parser.add_argument('--no_amp', action='store_true')
+    
+    # Segmentation options
+    parser.add_argument('--no_split', action='store_true',
+                        help='Disable audio segmentation (use random crop instead)')
+    parser.add_argument('--max_frames', type=int, default=128,
+                        help='Max frames per segment (128=5.12s @ 8kHz)')
+    parser.add_argument('--overlap_ratio', type=float, default=0.0,
+                        help='Overlap ratio between segments (0.0-0.5)')
 
     args = parser.parse_args()
 
@@ -624,14 +632,20 @@ def main():
     else:
         device = torch.device(args.device)
 
-    # Data
+    # Data (with segmentation options)
+    split_long_audio = not args.no_split
+    print(f"[Data] split_long_audio={split_long_audio}, max_frames={args.max_frames}, overlap={args.overlap_ratio}")
+    
     train_loader, val_loader = create_train_val_loaders(
         train_dir=args.train_dir,
         val_dir=args.val_dir,
         batch_size=config['training']['batch_size'],
         num_workers=args.num_workers,
         sample_rate=config['audio']['sample_rate'],
-        pin_memory=True
+        pin_memory=True,
+        max_frames=args.max_frames,
+        split_long_audio=split_long_audio,
+        overlap_ratio=args.overlap_ratio
     )
 
     # Train
