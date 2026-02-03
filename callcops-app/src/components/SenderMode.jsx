@@ -940,10 +940,12 @@ const styles = StyleSheet.create({
   downloadButton: {
     flexDirection: 'row',
     alignItems: 'center',
-    backgroundColor: '#3b82f6',
+    backgroundColor: 'rgba(59, 130, 246, 0.2)', // Translucent Blue
+    borderWidth: 1,
+    borderColor: 'rgba(255, 255, 255, 0.4)', // White border for contrast
     paddingHorizontal: 32,
     paddingVertical: 16,
-    borderRadius: 12,
+    borderRadius: 24, // Rounder for modern look
     marginTop: 24,
     gap: 12,
   },

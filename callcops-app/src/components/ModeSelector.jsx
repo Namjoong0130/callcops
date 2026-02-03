@@ -109,8 +109,8 @@ const styles = StyleSheet.create({
         borderWidth: 1,
     },
     senderButton: {
-        backgroundColor: 'rgba(74, 222, 128, 0.1)', // Brighter Green (400)
-        borderColor: 'rgba(255, 255, 255, 0.4)', // White Border
+        backgroundColor: 'rgba(190, 24, 93, 0.1)', // Pink theme (matched to border)
+        borderColor: '#be185d', // Dark Pink Border
     },
     receiverButton: {
         backgroundColor: 'rgba(96, 165, 250, 0.1)', // Brighter Blue (400)
@@ -125,7 +125,7 @@ const styles = StyleSheet.create({
         marginRight: 16,
     },
     senderIcon: {
-        backgroundColor: 'rgba(74, 222, 128, 0.2)', // Brighter Green
+        backgroundColor: 'rgba(190, 24, 93, 0.2)', // Pink theme
     },
     receiverIcon: {
         backgroundColor: 'rgba(96, 165, 250, 0.2)', // Brighter Blue

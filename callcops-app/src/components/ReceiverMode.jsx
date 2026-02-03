@@ -649,8 +649,9 @@ export default function ReceiverMode({ onBack }) {
                                                 styles.gridBit,
                                                 {
                                                     backgroundColor: bgColor,
-                                                    borderColor: showActiveBorder ? '#00ffff' : '#374151',
+                                                    borderColor: showActiveBorder ? '#FF00FF' : '#374151', // Magenta highlight
                                                     borderWidth: showActiveBorder ? 2 : 0.5,
+                                                    zIndex: showActiveBorder ? 10 : 1
                                                 }
                                             ]}
                                         />
@@ -708,8 +709,9 @@ export default function ReceiverMode({ onBack }) {
                                         styles.miniGridBit,
                                         {
                                             backgroundColor: bgColor,
-                                            borderColor: isActive ? '#00ffff' : 'rgba(255,255,255,0.05)',
-                                            borderWidth: isActive ? 1 : 0.2,
+                                            borderColor: isActive ? '#FF00FF' : 'rgba(255,255,255,0.05)', // Magenta highlight
+                                            borderWidth: isActive ? 2 : 0.2, // Thicker border for active
+                                            zIndex: isActive ? 10 : 1,
                                         }
                                     ]}
                                 />
@@ -1477,6 +1479,11 @@ const styles = StyleSheet.create({
     },
     gridContainer: {
         // No more flexWrap - using explicit rows
+        borderWidth: 3,
+        borderColor: '#00FFFF', // Cyan border
+        borderRadius: 12,
+        padding: 6,
+        backgroundColor: 'rgba(0, 0, 0, 0.5)',
     },
     gridRow: {
         flexDirection: 'row',
@@ -1944,7 +1951,12 @@ const styles = StyleSheet.create({
         letterSpacing: 0.5,
     },
     miniMatrixGrid: {
-        alignItems: 'center', // Center the grid
+        alignItems: 'center',
+        borderWidth: 3,
+        borderColor: '#00FFFF', // Cyan border
+        borderRadius: 12,
+        padding: 6,
+        backgroundColor: 'rgba(0, 0, 0, 0.5)',
     },
     miniMatrixRow: {
         flexDirection: 'row',
