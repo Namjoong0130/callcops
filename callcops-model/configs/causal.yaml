@@ -57,28 +57,45 @@ model:
 training:
   batch_size: 24
   learning_rate: 0.0001             # 1e-4 (초기 학습)
+  num_workers: 4
+  adam_betas: [0.5, 0.9]
   lr_scheduler: "cosine"
   warmup_epochs: 5
   epochs: 100
+  grad_clip: 1.0
+  use_amp: true                     # Mixed Precision (BF16)
   
-  # 손실 함수 가중치
-  loss_weights:
-    message: 1.0                    # BCE loss for bit accuracy
-    audio: 10.0                     # L1 + Multi-resolution STFT
-    adversarial: 0.1                # Discriminator loss
-    perceptual: 0.5                 # Perceptual loss (optional)
+  # ═══════════════════════════════════════════════════
+  # 손실 함수 가중치 (Lambda Values)
+  # ═══════════════════════════════════════════════════
+  # 전략: Audio-Priority (SNR 우선, BER은 BCH 허용 범위 내에서 관리)
+  #
+  # lambda_bit:   2.0   — 비트 임베딩 압박 완화
+  # lambda_audio: 50.0  — Mel Loss (지각적 품질)
+  # lambda_stft:  10.0  — 스펙트럼 보존
+  # lambda_l1:    10.0  — Waveform 직접 보존
+  # lambda_adv:   0.05  — GAN 안정성
+  # lambda_det:   0.1   — Detection 정확도
+  # ═══════════════════════════════════════════════════
+  lambda_bit: 2.0                   # BCE loss for bit accuracy
+  lambda_audio: 50.0                # Mel Loss (perceptual quality)
+  lambda_stft: 10.0                 # Multi-resolution STFT loss
+  lambda_l1: 10.0                   # L1 waveform loss → SNR
+  lambda_adv: 0.05                  # Adversarial loss (GAN)
+  lambda_det: 0.1                   # Detection accuracy
   
   # SNR 목표
   target_snr_db: 25.0               # 최소 25dB SNR 목표
   
-  # Gradient clipping
-  gradient_clip: 1.0
+  # Encoder Alpha (perturbation scale)
+  encoder_alpha: 0.25               # 물리적 강도 제한
   
   # Early stopping
   early_stopping:
-    patience: 10
-    metric: "val_loss"
-    mode: "min"
+    enabled: true
+    monitor: "val_snr"              # SNR 기반 모니터링
+    min_snr: 15.0                   # 15dB 미만이면 카운트
+    patience: 10                    # 10 에포크 연속 → 종료
 
 # 데이터 증강
 augmentation:
