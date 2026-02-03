@@ -208,6 +208,23 @@ def export_decoder_onnx(
 # INT8 Quantization
 # =============================================================================
 
+def strip_onnx_shapes(path: Path):
+    """
+    ONNX 모델에서 기존 shape 정보를 제거.
+    PyTorch export 시 생성된 잘못된 shape 정보가 양자화 시 
+    InferenceError (e.g. 256 vs 32)를 유발하는 것을 방지.
+    """
+    try:
+        import onnx
+        model = onnx.load(str(path))
+        # Clear value_info (intermediate shapes)
+        while len(model.graph.value_info) > 0:
+            model.graph.value_info.pop()
+        onnx.save(model, str(path))
+        print(f"   🧹 Stripped existing shapes from {path.name}")
+    except Exception as e:
+        print(f"   ⚠️  Failed to strip shapes: {e}")
+
 def quantize_onnx_dynamic(
     input_path: Path,
     output_path: Path
@@ -220,9 +237,11 @@ def quantize_onnx_dynamic(
     try:
         from onnxruntime.quantization import quantize_dynamic, QuantType
     except ImportError:
-        print("⚠️  onnxruntime-extensions required for quantization")
-        print("   Install: pip install onnxruntime onnxruntime-extensions")
+        print("⚠️  onnxruntime required for quantization")
         return input_path
+    
+    # Strip shapes before quantization to avoid (256 vs 32) mismatch
+    strip_onnx_shapes(input_path)
     
     quantize_dynamic(
         model_input=str(input_path),

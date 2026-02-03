@@ -1,5 +1,8 @@
 import { registerRootComponent } from 'expo';
 
+// Polyfill Buffer for React Native
+global.Buffer = global.Buffer || require('buffer').Buffer;
+
 import App from './App';
 
 // registerRootComponent calls AppRegistry.registerComponent('main', () => App);
