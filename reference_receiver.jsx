@@ -473,11 +473,6 @@ export default function ReceiverMode({ onBack }) {
             let animIdx = 0;
 
             const animateBit = () => {
-                // Check if analysis was cancelled
-                if (!audioDataRef.current) {
-                    return; // User pressed End Call, stop animation
-                }
-
                 if (animIdx >= framesToAnimate.length) {
                     // Animation done, update confidence and move to next chunk
                     let totalConf = 0;
@@ -582,10 +577,6 @@ export default function ReceiverMode({ onBack }) {
     };
 
     const handleReset = async () => {
-        // Stop the analysis loop immediately
-        audioDataRef.current = null;
-        processingOffsetRef.current = 0;
-
         if (soundRef.current) {
             await soundRef.current.stopAsync();
             await soundRef.current.unloadAsync();
@@ -599,8 +590,6 @@ export default function ReceiverMode({ onBack }) {
         setCrcInfo({ expected: null, actual: null });
         setConfidence(0);
         setBitProbs(null);
-        setCurrentChunkProbs(null);
-        setActiveIndices(new Set());
         setErrorMessage(null);
         setUsedOnnx(false);
     };
