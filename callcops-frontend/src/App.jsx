@@ -422,6 +422,7 @@ function MainApp() {
             <div>
               <EmbedPanel
                 onEmbed={handleEmbed}
+                createStreamingEncoder={inference.createStreamingEncoder}
                 onVerify={handleVerify}
                 isLoading={inference.isLoading}
                 isModelReady={true}

@@ -380,6 +380,49 @@ def validate_onnx_model(
     return all_passed
 
 
+def validate_streaming_shape(onnx_path: Path) -> bool:
+    """
+    Validate that the ONNX encoder works with streaming-sized inputs.
+    Tests various input lengths used by StreamingEncoderWrapper.
+    """
+    import onnxruntime as ort
+
+    session = ort.InferenceSession(str(onnx_path), providers=['CPUExecutionProvider'])
+
+    # Common streaming sizes:
+    # 1920 = 5 history frames + 1 new frame (default wrapper config)
+    # 640  = 1 history frame + 1 new frame (minimal config)
+    # 320  = single frame (no history, edge case)
+    STREAMING_LENGTHS = [1920, 640, 960, 320]
+
+    print(f"\n   Validating streaming shapes for {onnx_path.name}...")
+    all_passed = True
+
+    for length in STREAMING_LENGTHS:
+        try:
+            audio = np.random.randn(1, 1, length).astype(np.float32)
+            message = np.random.randint(0, 2, (1, 128)).astype(np.float32)
+
+            result = session.run(None, {'audio': audio, 'message': message})
+            output = result[0]
+
+            if output.shape == (1, 1, length):
+                print(f"      T={length:5d}: output={output.shape} ✅")
+            else:
+                print(f"      T={length:5d}: output={output.shape} ❌ (expected [1,1,{length}])")
+                all_passed = False
+        except Exception as e:
+            print(f"      T={length:5d}: ❌ FAILED - {e}")
+            all_passed = False
+
+    if all_passed:
+        print(f"   ✅ All streaming shapes validated")
+    else:
+        print(f"   ❌ Some streaming shapes failed")
+
+    return all_passed
+
+
 def check_onnx_model(onnx_path: Path) -> bool:
     """ONNX 모델 유효성 검사"""
     try:
@@ -484,6 +527,7 @@ def main():
         if args.validate:
             encoder_wrapper = EncoderONNXWrapper(model.encoder)
             validate_onnx_model(encoder_wrapper, encoder_path, is_encoder=True)
+            validate_streaming_shape(encoder_path)
         
         if args.quantize:
             print("\n🔧 Quantizing Encoder...")

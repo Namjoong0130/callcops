@@ -1,17 +1,18 @@
 /**
  * RealtimeEmbedDemo Component
  *
- * Real-time watermark embedding with message rotation for correct cyclic alignment.
- *
- * The encoder model embeds bit[frame_index % 128] per frame, but always starts
- * from frame 0 for each chunk. We rotate the message so that the encoder's
- * frame 0 maps to the correct global cyclic bit position.
+ * Real-time watermark embedding using StreamingEncoderWrapper.
  *
  * Processing pipeline:
- * - onaudioprocess accumulates samples into a ref buffer
- * - tryProcessNext() processes one chunk, then chains to itself via .then()
- *   to immediately process the next chunk (no waiting for next audio event)
- * - On stop, remaining accumulated samples are drained sequentially with await
+ * - ScriptProcessor captures 2048-sample buffers (256ms @ 8kHz)
+ * - Samples accumulate in a ref buffer
+ * - tryProcessNext() processes one 320-sample frame via wrapper.processFrame()
+ * - The wrapper manages a rolling history buffer (5 frames = 1600 samples)
+ *   and feeds [history + frame] = 1920 samples to the ONNX encoder,
+ *   extracting only the last 320 watermarked samples
+ * - Global bit indexing is handled internally by the wrapper via message rotation
+ * - After each frame, chains to itself to process the next immediately
+ * - On stop, remaining accumulated samples are drained frame-by-frame
  */
 
 import { useState, useCallback, useRef, useEffect } from 'react';
@@ -19,11 +20,10 @@ import { RealtimeOscilloscope } from './RealtimeOscilloscope';
 
 // Constants matching the encoder model
 const SAMPLE_RATE = 8000;
-const FRAME_SAMPLES = 320;       // 40ms @ 8kHz — model's atomic unit
+const FRAME_SAMPLES = 320;       // 40ms @ 8kHz — model's atomic unit (1 bit per frame)
 const PAYLOAD_LENGTH = 128;      // 128-bit cyclic payload
-const CHUNK_SIZE = FRAME_SAMPLES * 4;  // 160ms — 4 frames per chunk
 
-export function RealtimeEmbedDemo({ onEmbed, isModelReady = false, externalMessage = null, onVerify }) {
+export function RealtimeEmbedDemo({ onEmbed, createStreamingEncoder, isModelReady = false, externalMessage = null, onVerify }) {
   const [isStreaming, setIsStreaming] = useState(false);
   const [isFinalizing, setIsFinalizing] = useState(false);
   const [recordedAudio, setRecordedAudio] = useState(null);
@@ -51,11 +51,9 @@ export function RealtimeEmbedDemo({ onEmbed, isModelReady = false, externalMessa
   const accumulatedSamplesRef = useRef(new Float32Array(0));
   const watermarkedChunksRef = useRef([]);
   const messageRef = useRef(null);
-  const frameOffsetRef = useRef(0);
 
-  // Ref to keep onEmbed accessible in stopStreaming without adding it as dependency
-  const onEmbedRef = useRef(null);
-  useEffect(() => { onEmbedRef.current = onEmbed; }, [onEmbed]);
+  // Streaming wrapper ref — holds the StreamingEncoderWrapper instance
+  const streamingWrapperRef = useRef(null);
 
   // Generate random 128-bit message
   const generateMessage = useCallback(() => {
@@ -108,27 +106,21 @@ export function RealtimeEmbedDemo({ onEmbed, isModelReady = false, externalMessa
     return new Blob([buffer], { type: 'audio/wav' });
   }, []);
 
-  // Helper: rotate message for a chunk at the current frame offset
-  const rotateMessage = (msg, offset) => {
-    const rotation = offset % PAYLOAD_LENGTH;
-    const rotated = new Float32Array(PAYLOAD_LENGTH);
-    for (let i = 0; i < PAYLOAD_LENGTH; i++) {
-      rotated[i] = msg[(i + rotation) % PAYLOAD_LENGTH];
-    }
-    return rotated;
-  };
-
   // Start streaming
   const startStreaming = useCallback(async () => {
-    if (!onEmbed || !isModelReady) return;
+    if (!createStreamingEncoder || !isModelReady) return;
 
     const currentMessage = externalMessage || message || generateMessage();
     messageRef.current = currentMessage;
 
-    // Reset refs
+    // Create and reset the streaming wrapper
+    const wrapper = await createStreamingEncoder();
+    wrapper.reset();
+    streamingWrapperRef.current = wrapper;
+
+    // Reset accumulation buffers
     accumulatedSamplesRef.current = new Float32Array(0);
     watermarkedChunksRef.current = [];
-    frameOffsetRef.current = 0;
 
     // Clear previous recording
     if (recordedAudioUrl) {
@@ -161,67 +153,66 @@ export function RealtimeEmbedDemo({ onEmbed, isModelReady = false, externalMessa
       const processor = audioContext.createScriptProcessor(bufferSize, 1, 1);
       processorRef.current = processor;
 
-      // Chunk processing with self-chaining.
-      // After finishing one chunk, immediately tries the next accumulated chunk
+      // Frame processing with self-chaining.
+      // After finishing one frame, immediately tries the next accumulated frame
       // instead of waiting for the next onaudioprocess event.
       const tryProcessNext = () => {
         if (isProcessingRef.current) return;
-        if (accumulatedSamplesRef.current.length < CHUNK_SIZE) return;
+        if (accumulatedSamplesRef.current.length < FRAME_SAMPLES) return;
 
-        const chunk = accumulatedSamplesRef.current.slice(0, CHUNK_SIZE);
-        accumulatedSamplesRef.current = accumulatedSamplesRef.current.slice(CHUNK_SIZE);
-
-        const numFrames = chunk.length / FRAME_SAMPLES;
-        const rotatedMsg = rotateMessage(messageRef.current, frameOffsetRef.current);
-        frameOffsetRef.current += numFrames;
+        const frame = accumulatedSamplesRef.current.slice(0, FRAME_SAMPLES);
+        accumulatedSamplesRef.current = accumulatedSamplesRef.current.slice(FRAME_SAMPLES);
 
         isProcessingRef.current = true;
         const startTime = performance.now();
 
-        onEmbed(chunk, rotatedMsg).then(watermarkedChunk => {
-          const latency = performance.now() - startTime;
+        // Wrapper handles history buffer, message rotation, and bit indexing internally
+        streamingWrapperRef.current.processFrame(frame, messageRef.current)
+          .then(watermarkedFrame => {
+            const latency = performance.now() - startTime;
 
-          // Save watermarked chunk for final output
-          watermarkedChunksRef.current.push(watermarkedChunk);
+            // Save watermarked frame for final output
+            watermarkedChunksRef.current.push(watermarkedFrame);
 
-          latenciesRef.current.push(latency);
-          if (latenciesRef.current.length > 50) latenciesRef.current.shift();
-          const avgLatency = latenciesRef.current.reduce((a, b) => a + b, 0) / latenciesRef.current.length;
+            latenciesRef.current.push(latency);
+            if (latenciesRef.current.length > 50) latenciesRef.current.shift();
+            const avgLatency = latenciesRef.current.reduce((a, b) => a + b, 0) / latenciesRef.current.length;
 
-          setStats(prev => ({
-            latencyMs: latency.toFixed(1),
-            chunksProcessed: prev.chunksProcessed + 1,
-            totalSamples: prev.totalSamples + chunk.length,
-            avgLatency: avgLatency.toFixed(1)
-          }));
+            setStats(prev => ({
+              latencyMs: latency.toFixed(1),
+              chunksProcessed: prev.chunksProcessed + 1,
+              totalSamples: prev.totalSamples + frame.length,
+              avgLatency: avgLatency.toFixed(1)
+            }));
 
-          setInputBuffer(prev => {
-            const newBuf = new Float32Array(2048);
-            const shift = Math.min(chunk.length, 2048);
-            newBuf.set(prev.slice(shift));
-            newBuf.set(chunk.slice(0, shift), 2048 - shift);
-            return newBuf;
+            setInputBuffer(prev => {
+              const newBuf = new Float32Array(2048);
+              const shift = Math.min(frame.length, 2048);
+              newBuf.set(prev.slice(shift));
+              newBuf.set(frame.slice(0, shift), 2048 - shift);
+              return newBuf;
+            });
+
+            setOutputBuffer(prev => {
+              const newBuf = new Float32Array(2048);
+              const shift = Math.min(watermarkedFrame.length, 2048);
+              newBuf.set(prev.slice(shift));
+              newBuf.set(watermarkedFrame.slice(0, shift), 2048 - shift);
+              return newBuf;
+            });
+
+            isProcessingRef.current = false;
+
+            // Chain: immediately try the next accumulated frame.
+            // Only chain while streaming — after stop, stopStreaming drains remaining data.
+            if (isStreamingRef.current) {
+              tryProcessNext();
+            }
+          })
+          .catch(err => {
+            console.error('Frame processing error:', err);
+            isProcessingRef.current = false;
           });
-
-          setOutputBuffer(prev => {
-            const newBuf = new Float32Array(2048);
-            const shift = Math.min(watermarkedChunk.length, 2048);
-            newBuf.set(prev.slice(shift));
-            newBuf.set(watermarkedChunk.slice(0, shift), 2048 - shift);
-            return newBuf;
-          });
-
-          isProcessingRef.current = false;
-
-          // Chain: immediately try the next accumulated chunk.
-          // Only chain while streaming — after stop, stopStreaming drains remaining data.
-          if (isStreamingRef.current) {
-            tryProcessNext();
-          }
-        }).catch(err => {
-          console.error('Chunk processing error:', err);
-          isProcessingRef.current = false;
-        });
       };
 
       processor.onaudioprocess = (e) => {
@@ -256,7 +247,7 @@ export function RealtimeEmbedDemo({ onEmbed, isModelReady = false, externalMessa
     } catch (err) {
       console.error('Failed to start streaming:', err);
     }
-  }, [onEmbed, isModelReady, message, externalMessage, generateMessage, recordedAudioUrl]);
+  }, [createStreamingEncoder, isModelReady, message, externalMessage, generateMessage, recordedAudioUrl]);
 
   // Stop streaming — drain remaining accumulated samples, then concatenate
   const stopStreaming = useCallback(async () => {
@@ -276,34 +267,25 @@ export function RealtimeEmbedDemo({ onEmbed, isModelReady = false, externalMessa
       check();
     });
 
-    // Drain all remaining accumulated samples through the encoder.
-    // This ensures no audio is lost — every captured sample gets watermarked.
-    const embedFn = onEmbedRef.current;
+    // Drain all remaining accumulated samples through the wrapper.
+    // Each frame is processed individually with full history context.
+    const wrapper = streamingWrapperRef.current;
     const msg = messageRef.current;
 
-    while (accumulatedSamplesRef.current.length >= FRAME_SAMPLES && embedFn && msg) {
-      const available = accumulatedSamplesRef.current.length;
-      const takeSize = Math.min(available, CHUNK_SIZE);
-      const alignedSize = Math.floor(takeSize / FRAME_SAMPLES) * FRAME_SAMPLES;
-      if (alignedSize === 0) break;
-
-      const chunk = accumulatedSamplesRef.current.slice(0, alignedSize);
-      accumulatedSamplesRef.current = accumulatedSamplesRef.current.slice(alignedSize);
-
-      const numFrames = chunk.length / FRAME_SAMPLES;
-      const rotatedMsg = rotateMessage(msg, frameOffsetRef.current);
-      frameOffsetRef.current += numFrames;
+    while (accumulatedSamplesRef.current.length >= FRAME_SAMPLES && wrapper && msg) {
+      const frame = accumulatedSamplesRef.current.slice(0, FRAME_SAMPLES);
+      accumulatedSamplesRef.current = accumulatedSamplesRef.current.slice(FRAME_SAMPLES);
 
       try {
-        const watermarkedChunk = await embedFn(chunk, rotatedMsg);
-        watermarkedChunksRef.current.push(watermarkedChunk);
+        const watermarkedFrame = await wrapper.processFrame(frame, msg);
+        watermarkedChunksRef.current.push(watermarkedFrame);
       } catch (err) {
-        console.error('Remaining chunk processing error:', err);
+        console.error('Drain frame error:', err);
         break;
       }
     }
 
-    // Concatenate all watermarked chunks
+    // Concatenate all watermarked frames
     const chunks = watermarkedChunksRef.current;
     if (chunks.length > 0) {
       const totalLength = chunks.reduce((sum, c) => sum + c.length, 0);
@@ -349,6 +331,7 @@ export function RealtimeEmbedDemo({ onEmbed, isModelReady = false, externalMessa
     setInputBuffer(new Float32Array(2048));
     setOutputBuffer(new Float32Array(2048));
     setStats({ latencyMs: 0, chunksProcessed: 0, totalSamples: 0, avgLatency: 0 });
+    streamingWrapperRef.current = null;
   }, [recordedAudioUrl]);
 
   // Cleanup on unmount
@@ -365,6 +348,7 @@ export function RealtimeEmbedDemo({ onEmbed, isModelReady = false, externalMessa
 
   const streamDuration = stats.totalSamples / SAMPLE_RATE;
   const recordedDuration = recordedAudio ? (recordedAudio.length / SAMPLE_RATE).toFixed(1) : 0;
+  const wrapperFrameIndex = streamingWrapperRef.current?.frameIndex ?? 0;
 
   return (
     <div className="glass rounded-xl p-4 space-y-4">
@@ -376,7 +360,7 @@ export function RealtimeEmbedDemo({ onEmbed, isModelReady = false, externalMessa
           Real-Time Streaming Demo
         </h3>
         <span className="text-xs text-gray-500">
-          {isStreaming ? `${streamDuration.toFixed(1)}s` : '8 kHz | 160ms Chunks'}
+          {isStreaming ? `${streamDuration.toFixed(1)}s | Frame #${wrapperFrameIndex}` : '8 kHz | 40ms Frames | 25 FPS'}
         </span>
       </div>
 
@@ -391,7 +375,7 @@ export function RealtimeEmbedDemo({ onEmbed, isModelReady = false, externalMessa
             <svg className="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
               <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5l7 7-7 7" />
             </svg>
-            <span className="px-2 py-0.5 bg-purple-500/15 text-purple-400 rounded">Encoder (ONNX)</span>
+            <span className="px-2 py-0.5 bg-purple-500/15 text-purple-400 rounded">Encoder (1920→320)</span>
             <svg className="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
               <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5l7 7-7 7" />
             </svg>
@@ -410,7 +394,7 @@ export function RealtimeEmbedDemo({ onEmbed, isModelReady = false, externalMessa
               <span className="text-sm font-mono font-bold text-blue-400">{stats.avgLatency}<span className="text-[9px] text-gray-500 ml-0.5">ms</span></span>
             </div>
             <div className="bg-surface/50 rounded-lg px-3 py-2 flex items-baseline justify-between">
-              <span className="text-[10px] text-gray-500">Chunks</span>
+              <span className="text-[10px] text-gray-500">Frames</span>
               <span className="text-sm font-mono font-bold text-yellow-400">{stats.chunksProcessed}</span>
             </div>
             <div className="bg-surface/50 rounded-lg px-3 py-2 flex items-baseline justify-between">
@@ -485,7 +469,7 @@ export function RealtimeEmbedDemo({ onEmbed, isModelReady = false, externalMessa
             실시간 스트리밍 시작
           </button>
           <div className="text-center text-[10px] text-gray-500 space-y-0.5">
-            <p>160ms 청크 단위 저지연 처리 | WebAudio + ONNX Runtime Web</p>
+            <p>40ms 프레임 단위 처리 (25 FPS) | History Buffer 1920 samples | ONNX Runtime Web</p>
             <p>Original(파란색) vs Watermarked(보라색) 주파수 스펙트럼을 실시간 비교합니다</p>
           </div>
         </div>

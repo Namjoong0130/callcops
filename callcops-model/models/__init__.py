@@ -30,6 +30,11 @@ from .codec_simulator import (
     G729Simulator,
 )
 
+from .streaming import (
+    StreamingEncoderWrapper,
+    validate_streaming_vs_batch,
+)
+
 from .losses import (
     CallCopsLoss,
     CallShieldLoss,
@@ -62,6 +67,9 @@ __all__ = [
     "DifferentiableCodecSimulator",
     "G711Simulator",
     "G729Simulator",
+    # Streaming
+    "StreamingEncoderWrapper",
+    "validate_streaming_vs_batch",
     # Losses
     "CallCopsLoss",
     "CallShieldLoss",

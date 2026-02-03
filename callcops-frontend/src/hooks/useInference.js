@@ -11,6 +11,7 @@
 
 import { useState, useRef, useCallback, useEffect } from 'react';
 import * as ort from 'onnxruntime-web';
+import { StreamingEncoderWrapper } from '../utils/StreamingEncoderWrapper';
 
 // Configure ONNX Runtime Web
 ort.env.wasm.wasmPaths = 'https://cdn.jsdelivr.net/npm/onnxruntime-web/dist/';
@@ -316,6 +317,16 @@ export function useInference() {
   }, [loadEncoder, alignToFrames]);
 
   /**
+   * Create a StreamingEncoderWrapper for real-time frame-by-frame encoding.
+   * Loads the encoder model if not already loaded.
+   * @returns {Promise<StreamingEncoderWrapper>} - Ready-to-use streaming wrapper
+   */
+  const createStreamingEncoder = useCallback(async () => {
+    const session = encoderSessionRef.current || await loadEncoder();
+    return new StreamingEncoderWrapper(session);
+  }, [loadEncoder]);
+
+  /**
    * Calculate confidence from bit probabilities
    * Confidence = average of max(p, 1-p) for all bits
    */
@@ -391,6 +402,7 @@ export function useInference() {
     runDecoder,
     runDecoderAtPosition,  // NEW: Detect at specific position
     runEncoder,
+    createStreamingEncoder,  // NEW: For real-time 40ms frame streaming
 
     // Analysis functions
     calculateConfidence,

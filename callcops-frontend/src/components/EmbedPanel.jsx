@@ -10,12 +10,13 @@ import { AudioUploader } from './AudioUploader';
 import { RealtimeEmbedDemo } from './RealtimeEmbedDemo';
 import { AudioComparisonPanel } from './AudioComparisonPanel';
 
-export function EmbedPanel({ 
+export function EmbedPanel({
   onEmbed,
-  onVerify, 
+  createStreamingEncoder,
+  onVerify,
   isLoading = false,
   isModelReady = false,
-  error = null 
+  error = null
 }) {
   const [sourceAudio, setSourceAudio] = useState(null);
   const [sourceFileName, setSourceFileName] = useState(null);
@@ -190,7 +191,7 @@ export function EmbedPanel({
   return (
     <div className="space-y-6">
       {/* Real-Time Demo */}
-      <RealtimeEmbedDemo onEmbed={onEmbed} isModelReady={isModelReady} externalMessage={message} onVerify={onVerify} />
+      <RealtimeEmbedDemo onEmbed={onEmbed} createStreamingEncoder={createStreamingEncoder} isModelReady={isModelReady} externalMessage={message} onVerify={onVerify} />
       
       {/* Divider */}
       <div className="flex items-center gap-3">
