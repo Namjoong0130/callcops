@@ -10,6 +10,7 @@ Features:
 3. Opset 16 (ONNX Runtime Web 호환)
 4. INT8 Quantization (Static + Dynamic)
 5. PyTorch vs ONNX 검증
+6. Causal / Non-Causal 모델 자동 감지
 
 Target:
 - ONNX Runtime Web (Wasm/WebGPU)
@@ -32,6 +33,7 @@ import torch.nn.functional as F
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from models import CallCopsNet, Encoder, Decoder
+from models.rtaw_net_causal import CausalCallCopsNet, CausalEncoder, CausalDecoder
 
 
 # =============================================================================
@@ -474,6 +476,10 @@ def main():
         '--skip_decoder', action='store_true',
         help='Skip decoder export'
     )
+    parser.add_argument(
+        '--causal', action='store_true',
+        help='Force Causal model loading (auto-detected from checkpoint)'
+    )
     
     args = parser.parse_args()
     
@@ -489,15 +495,28 @@ def main():
     # ========================================
     print(f"\n📦 Loading checkpoint: {args.checkpoint}")
     
-    checkpoint = torch.load(args.checkpoint, map_location='cpu')
+    checkpoint = torch.load(args.checkpoint, map_location='cpu', weights_only=False)
     config = checkpoint.get('config', {})
     
-    model = CallCopsNet(
-        message_dim=config.get('watermark', {}).get('payload_length', 128),
-        hidden_channels=config.get('model', {}).get('hidden_channels', [32, 64, 128, 256]),
-        num_residual_blocks=config.get('model', {}).get('num_residual_blocks', 4),
-        use_discriminator=False  # Export에는 Discriminator 불필요
-    )
+    # Auto-detect Causal vs Non-Causal model
+    is_causal = checkpoint.get('architecture', '') == 'causal' or args.causal
+    
+    if is_causal:
+        print("   🔄 Detected: CAUSAL model")
+        model = CausalCallCopsNet(
+            message_dim=config.get('watermark', {}).get('payload_length', 128),
+            hidden_channels=config.get('model', {}).get('hidden_channels', [32, 64, 128, 256]),
+            num_residual_blocks=config.get('model', {}).get('num_residual_blocks', 4),
+            use_discriminator=False  # Export에는 Discriminator 불필요
+        )
+    else:
+        print("   🔄 Detected: NON-CAUSAL model")
+        model = CallCopsNet(
+            message_dim=config.get('watermark', {}).get('payload_length', 128),
+            hidden_channels=config.get('model', {}).get('hidden_channels', [32, 64, 128, 256]),
+            num_residual_blocks=config.get('model', {}).get('num_residual_blocks', 4),
+            use_discriminator=False  # Export에는 Discriminator 불필요
+        )
     
     # Load weights (strict=False for partial load)
     model.load_state_dict(checkpoint['model_state_dict'], strict=False)

@@ -388,14 +388,13 @@ class CausalFrameWiseFusionBlock(nn.Module):
         bit_embed = self.bit_embedding(frame_bits.unsqueeze(-1))  # [B, num_frames, C]
         bit_embed = bit_embed.permute(0, 2, 1)  # [B, C, num_frames]
 
-        # Expand to full resolution
-        bit_feat = bit_embed.repeat_interleave(self.frame_samples, dim=-1)  # [B, C, T']
-
-        # Handle size mismatch
-        if bit_feat.shape[-1] < T:
-            bit_feat = F.pad(bit_feat, (0, T - bit_feat.shape[-1]))
-        elif bit_feat.shape[-1] > T:
-            bit_feat = bit_feat[:, :, :T]
+        # Expand to full resolution using interpolate (ONNX-safe, handles any T)
+        # This avoids repeat_interleave + manual size adjustment issues
+        bit_feat = F.interpolate(
+            bit_embed,
+            size=T,
+            mode='nearest'
+        )  # [B, C, T] - exactly matches audio_feat size
 
         # Causal temporal modulation
         bit_feat_padded = F.pad(bit_feat, (self.temporal_padding, 0))
