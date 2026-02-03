@@ -17,6 +17,7 @@
     "expo-av": "~16.0.8",
     "expo-document-picker": "~14.0.8",
     "expo-file-system": "~19.0.21",
+    "expo-linear-gradient": "~15.0.8",
     "expo-sharing": "~14.0.8",
     "expo-status-bar": "~3.0.9",
     "onnxruntime-react-native": "^1.23.2",

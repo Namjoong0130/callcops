@@ -48,14 +48,14 @@ export default function CallResultScreen({ isValid, crcValid, payload, onEndCall
 
     return (
         <div className={`min-h-screen flex flex-col items-center justify-between py-12 px-6 ${isValid
-                ? 'bg-gradient-to-b from-green-900/50 via-gray-900 to-gray-900'
-                : 'bg-gradient-to-b from-red-900/50 via-gray-900 to-gray-900'
+            ? 'bg-gradient-to-b from-green-900/50 via-gray-900 to-gray-900'
+            : 'bg-gradient-to-b from-red-900/50 via-gray-900 to-gray-900'
             }`}>
             {/* Status Icon */}
             <div className="flex-1 flex flex-col items-center justify-center">
                 <div className={`w-28 h-28 rounded-full flex items-center justify-center mb-6 ${isValid
-                        ? 'bg-green-500/20 border-4 border-green-500'
-                        : 'bg-red-500/20 border-4 border-red-500'
+                    ? 'bg-green-500/20 border-4 border-green-500'
+                    : 'bg-red-500/20 border-4 border-red-500'
                     }`}>
                     {isValid ? (
                         <svg className="w-14 h-14 text-green-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -75,35 +75,6 @@ export default function CallResultScreen({ isValid, crcValid, payload, onEndCall
                 <p className={`text-lg mb-8 ${isValid ? 'text-green-300/70' : 'text-red-300/70'}`}>
                     {isValid ? 'This call is authenticated' : 'Warning: Potential Voice Phishing'}
                 </p>
-
-                {/* Caller Info Card (shown only for valid calls) */}
-                {isValid && (
-                    <div className="w-full max-w-sm bg-gray-800/50 rounded-2xl p-5 border border-gray-700/50 space-y-4">
-                        <h2 className="text-gray-400 text-sm font-medium uppercase tracking-wider mb-3">Caller Information</h2>
-
-                        <div className="flex justify-between items-center">
-                            <span className="text-gray-500">Sync Pattern</span>
-                            <span className="text-white font-mono text-sm">{info.sync}</span>
-                        </div>
-
-                        <div className="flex justify-between items-center">
-                            <span className="text-gray-500">Timestamp</span>
-                            <span className="text-white font-mono text-sm">{info.timestamp}</span>
-                        </div>
-
-                        <div className="flex justify-between items-center">
-                            <span className="text-gray-500">Auth Code</span>
-                            <span className="text-white font-mono text-sm">{info.authCode}</span>
-                        </div>
-
-                        <div className="flex justify-between items-center">
-                            <span className="text-gray-500">CRC Check</span>
-                            <span className={`font-mono text-sm ${crcValid ? 'text-green-400' : 'text-yellow-400'}`}>
-                                {crcValid ? '✓ Valid' : '⚠ Mismatch'}
-                            </span>
-                        </div>
-                    </div>
-                )}
 
                 {/* Warning Card (shown only for invalid calls) */}
                 {!isValid && (
@@ -136,7 +107,7 @@ export default function CallResultScreen({ isValid, crcValid, payload, onEndCall
                     <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M3 5a2 2 0 012-2h3.28a1 1 0 01.948.684l1.498 4.493a1 1 0 01-.502 1.21l-2.257 1.13a11.042 11.042 0 005.516 5.516l1.13-2.257a1 1 0 011.21-.502l4.493 1.498a1 1 0 01.684.949V19a2 2 0 01-2 2h-1C9.716 21 3 14.284 3 6V5z" />
                 </svg>
             </button>
-            <span className="text-red-400 text-sm font-medium mt-3">End Call</span>
+            <span className="text-red-400 text-sm font-medium mt-3">나가기</span>
         </div>
     );
 }
