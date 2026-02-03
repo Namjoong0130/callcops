@@ -253,27 +253,105 @@ export default function SenderMode({ onBack }) {
             messageBitsRef.current = bits;
             setBitProbs(bits.map(b => b ? 1.0 : 0.0));
 
-            // Initialize LiveAudioStream
+            // Configure Audio session for iOS before LiveAudioStream
+            await Audio.setAudioModeAsync({
+                allowsRecordingIOS: true,
+                playsInSilentModeIOS: true,
+                staysActiveInBackground: true,
+                shouldDuckAndroid: true,
+                playThroughEarpieceAndroid: false,
+            });
+
+            // Load ONNX encoder for real-time encoding
+            let useOnnx = false;
+            if (inference.onnxAvailable) {
+                try {
+                    await inference.loadEncoder();
+                    useOnnx = true;
+                    setUsedOnnx(true);
+                    console.log('ONNX encoder ready for real-time encoding');
+                } catch (e) {
+                    console.warn('ONNX encoder failed to load, using fallback:', e);
+                }
+            }
+
+            console.log('Starting real-time recording with LiveAudioStream...');
+
+            // Use 44100Hz for iOS compatibility, then downsample to 8kHz
+            const CAPTURE_RATE = 44100;
+            const DOWNSAMPLE_FACTOR = CAPTURE_RATE / DOWNSAMPLE_RATE; // 5.5125
+            let downsampleAccum = 0;
+
             LiveAudioStream.init({
-                sampleRate: DOWNSAMPLE_RATE, // 8kHz for direct processing
+                sampleRate: CAPTURE_RATE,
                 channels: 1,
                 bitsPerSample: 16,
                 audioSource: 6, // VOICE_COMMUNICATION
-                bufferSize: 2048,
+                bufferSize: 4096,
             });
 
-            // Handle incoming audio data
-            LiveAudioStream.on('data', (base64Data) => {
+            // Real-time frame processing callback
+            LiveAudioStream.on('data', async (base64Data) => {
                 try {
                     const buffer = Buffer.from(base64Data, 'base64');
-                    const samples = [];
+
+                    // Convert Int16 to Float32 and downsample from 44100 to 8000
                     for (let i = 0; i < buffer.length; i += 2) {
-                        const sample = buffer.readInt16LE(i) / 32768.0;
-                        samples.push(sample);
+                        if (i + 1 < buffer.length) {
+                            downsampleAccum++;
+                            if (downsampleAccum >= DOWNSAMPLE_FACTOR) {
+                                downsampleAccum -= DOWNSAMPLE_FACTOR;
+                                const sample = buffer.readInt16LE(i) / 32768.0;
+                                inputBufferRef.current.push(sample);
+                            }
+                        }
                     }
-                    processAudioChunk(samples);
+
+                    const FRAME_SIZE = 320;
+
+                    // Process complete frames
+                    while (inputBufferRef.current.length >= FRAME_SIZE) {
+                        const frame = inputBufferRef.current.splice(0, FRAME_SIZE);
+                        const bitIdx = frameIndexRef.current % 128;
+                        const bit = messageBitsRef.current[bitIdx];
+
+                        let encodedFrame;
+
+                        if (useOnnx && inference.onnxAvailable) {
+                            // Real-time ONNX encoding for this frame
+                            try {
+                                const frameArray = new Float32Array(frame);
+                                const result = await inference.runEncoder(frameArray, messageBitsRef.current);
+                                encodedFrame = Array.from(result.encoded);
+                            } catch (e) {
+                                // Fallback to simple encoding
+                                const WATERMARK_STRENGTH = 0.02;
+                                encodedFrame = frame.map((sample, i) => {
+                                    const watermark = bit ? WATERMARK_STRENGTH : -WATERMARK_STRENGTH;
+                                    return sample + watermark * Math.sin(2 * Math.PI * (frameIndexRef.current * FRAME_SIZE + i) / 10);
+                                });
+                            }
+                        } else {
+                            const WATERMARK_STRENGTH = 0.02;
+                            encodedFrame = frame.map((sample, i) => {
+                                const watermark = bit ? WATERMARK_STRENGTH : -WATERMARK_STRENGTH;
+                                return sample + watermark * Math.sin(2 * Math.PI * (frameIndexRef.current * FRAME_SIZE + i) / 10);
+                            });
+                        }
+
+                        encodedBufferRef.current.push(...encodedFrame);
+                        frameIndexRef.current++;
+
+                        if (frameIndexRef.current % 4 === 0) {
+                            setCurrentBitIndex(bitIdx);
+                            const inputAmp = Math.sqrt(frame.reduce((sum, s) => sum + s * s, 0) / frame.length);
+                            const outputAmp = Math.sqrt(encodedFrame.reduce((sum, s) => sum + s * s, 0) / encodedFrame.length);
+                            setInputWaveform(prev => [...prev.slice(1), inputAmp * 3]);
+                            setOutputWaveform(prev => [...prev.slice(1), outputAmp * 3]);
+                        }
+                    }
                 } catch (e) {
-                    console.warn('Audio chunk processing error:', e);
+                    console.warn('Audio chunk error:', e);
                 }
             });
 
@@ -281,7 +359,7 @@ export default function SenderMode({ onBack }) {
             setState('recording');
             setRecordingTime(0);
             timerRef.current = setInterval(() => setRecordingTime(p => p + 1), 1000);
-            console.log('Real-time recording started');
+            console.log('Real-time encoding started' + (useOnnx ? ' with ONNX' : ' with fallback'));
         } catch (err) {
             console.error('Failed to start recording', err);
             setErrorMessage('녹음 시작 실패: ' + err.message);
@@ -294,16 +372,17 @@ export default function SenderMode({ onBack }) {
         try {
             console.log('Stopping real-time recording...');
             LiveAudioStream.stop();
+
             setState('encoding');
-            setStatusText('파일 저장 중...');
+            setStatusText('인코딩된 오디오 저장 중...');
             setProgress(50);
 
             const encoded = encodedBufferRef.current;
-            console.log(`Total encoded samples: ${encoded.length}`);
+            console.log(`Total encoded samples: ${encoded.length} (${encoded.length / DOWNSAMPLE_RATE} seconds)`);
 
             if (encoded.length === 0) {
                 console.warn('No audio captured.');
-                Alert.alert('오류', '녹음된 오디오가 없습니다.');
+                Alert.alert('오류', '녹음된 오디오가 없습니다. 마이크를 확인해주세요.');
                 setState('idle');
                 return;
             }
@@ -314,7 +393,7 @@ export default function SenderMode({ onBack }) {
             setEncodedUri(uri);
             setProgress(100);
             setState('complete');
-            console.log('Encoded file saved:', uri);
+            console.log('Real-time encoded file saved:', uri);
 
         } catch (err) {
             console.error('Stop recording error:', err);
