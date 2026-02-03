@@ -169,9 +169,9 @@ export function useInference() {
     }, []);
 
     /**
-     * Run decoder on audio data
+     * Run decoder on audio data (Batch Processing like Web)
      * @param {Float32Array} audioData - Audio samples at 8kHz
-     * @returns {Object} { bits128, confidence, frameProbs }
+     * @returns {Object} { bits128, confidence, numFrames }
      */
     const runDecoder = useCallback(async (audioData) => {
         if (!decoderSessionRef.current) {
@@ -181,45 +181,52 @@ export function useInference() {
         try {
             const session = decoderSessionRef.current;
 
-            // Calculate number of complete frames
-            const numFrames = Math.floor(audioData.length / FRAME_SAMPLES);
-            if (numFrames === 0) {
-                throw new Error('Audio too short');
+            // Align to frame boundary
+            const remainder = audioData.length % FRAME_SAMPLES;
+            let alignedAudio = audioData;
+            if (remainder !== 0) {
+                const pad = FRAME_SAMPLES - remainder;
+                const padded = new Float32Array(audioData.length + pad);
+                padded.set(audioData);
+                alignedAudio = padded;
             }
 
-            // Process frames and aggregate probabilities
+            const numFrames = alignedAudio.length / FRAME_SAMPLES;
+            if (numFrames === 0) throw new Error('Audio too short');
+
+            // Create tensor [1, 1, T] - Entire audio at once
+            // Note: onnxruntime-react-native might require plain array or specific format
+            // Check if model supports dynamic axes. Assuming yes as Web does.
+            const audioArray = Array.from(alignedAudio); // Convert to plain array for RN
+            const inputTensor = new Tensor('float32', audioArray, [1, 1, alignedAudio.length]);
+
+            // Run inference
+            const feeds = {};
+            feeds[session.inputNames[0]] = inputTensor;
+            const results = await session.run(feeds);
+
+            // Get bit_probs output (Expected shape: [1, num_frames])
+            const outputName = session.outputNames[0];
+            const outputData = results[outputName].data; // Float32Array
+
+            // Aggregate probabilities using CYCLIC method (like frontend)
+            // Each frame probability maps to bitIdx = frameIndex % 128
             const bitAccumulators = new Float32Array(PAYLOAD_LENGTH).fill(0);
             const bitCounts = new Float32Array(PAYLOAD_LENGTH).fill(0);
 
-            for (let frameIdx = 0; frameIdx < numFrames; frameIdx++) {
-                const start = frameIdx * FRAME_SAMPLES;
-                const frameData = audioData.slice(start, start + FRAME_SAMPLES);
-
-                // Create input tensor [1, 1, 320] - [batch, channel, samples]
-                const inputTensor = new Tensor('float32', Array.from(frameData), [1, 1, FRAME_SAMPLES]);
-
-                // Run inference
-                const feeds = {};
-                feeds[session.inputNames[0]] = inputTensor;
-                const results = await session.run(feeds);
-
-                // Get output probability (single value per frame)
-                const outputName = session.outputNames[0];
-                const prob = results[outputName].data[0];
-
-                // Map frame to bit position (cyclic)
-                const bitIdx = frameIdx % PAYLOAD_LENGTH;
-                bitAccumulators[bitIdx] += prob;
+            for (let i = 0; i < outputData.length; i++) {
+                const bitIdx = i % PAYLOAD_LENGTH;  // Cyclic mapping!
+                bitAccumulators[bitIdx] += outputData[i];
                 bitCounts[bitIdx] += 1;
             }
 
-            // Calculate averaged probabilities for each bit
+            // Calculate averaged probabilities
             const bits128 = new Float32Array(PAYLOAD_LENGTH);
             for (let i = 0; i < PAYLOAD_LENGTH; i++) {
                 bits128[i] = bitCounts[i] > 0 ? bitAccumulators[i] / bitCounts[i] : 0.5;
             }
 
-            // Calculate overall confidence
+            // Calculate confidence
             const confidences = bits128.map(p => Math.abs(p - 0.5) * 2);
             const avgConfidence = confidences.reduce((a, b) => a + b, 0) / confidences.length;
 
@@ -227,6 +234,7 @@ export function useInference() {
                 bits128,
                 confidence: avgConfidence,
                 numFrames,
+                rawScores: outputData, // Return raw frame probabilities for streaming viz
             };
         } catch (err) {
             console.error('Decoder inference error:', err);
@@ -235,10 +243,7 @@ export function useInference() {
     }, []);
 
     /**
-     * Run encoder on audio data with message
-     * @param {Float32Array} audioData - Audio samples at 8kHz
-     * @param {number[]} messageBits - 128-bit message
-     * @returns {Object} { encoded }
+     * Run encoder on audio data with message (Batch layout)
      */
     const runEncoder = useCallback(async (audioData, messageBits) => {
         if (!encoderSessionRef.current) {
@@ -248,48 +253,45 @@ export function useInference() {
         try {
             const session = encoderSessionRef.current;
 
-            // Calculate number of complete frames
-            const numFrames = Math.floor(audioData.length / FRAME_SAMPLES);
-            if (numFrames === 0) {
-                throw new Error('Audio too short');
+            // Align to frame boundary
+            const remainder = audioData.length % FRAME_SAMPLES;
+            let alignedAudio = audioData;
+            if (remainder !== 0) {
+                const pad = FRAME_SAMPLES - remainder;
+                const padded = new Float32Array(audioData.length + pad);
+                padded.set(audioData);
+                alignedAudio = padded;
             }
 
-            // Prepare full message tensor [1, 128]
+            const numFrames = alignedAudio.length / FRAME_SAMPLES;
+            if (numFrames === 0) throw new Error('Audio too short');
+
+            // Prepare tensors
+            // 1. Audio: [1, 1, T]
+            const audioArray = Array.from(alignedAudio);
+            const audioTensor = new Tensor('float32', audioArray, [1, 1, alignedAudio.length]);
+
+            // 2. Message: [1, 128]
             const messageArray = new Float32Array(PAYLOAD_LENGTH);
             for (let i = 0; i < PAYLOAD_LENGTH; i++) {
                 messageArray[i] = messageBits[i] || 0;
             }
             const messageTensor = new Tensor('float32', messageArray, [1, PAYLOAD_LENGTH]);
 
-            // Output encoded audio
-            const encoded = new Float32Array(audioData.length);
-            encoded.set(audioData); // Start with original
-
-            for (let frameIdx = 0; frameIdx < numFrames; frameIdx++) {
-                const start = frameIdx * FRAME_SAMPLES;
-                const frameData = audioData.slice(start, start + FRAME_SAMPLES);
-
-                // Create audio tensor - [1, 1, 320]
-                const audioTensor = new Tensor('float32', Array.from(frameData), [1, 1, FRAME_SAMPLES]);
-
-                // Run inference with audio and full message
-                const feeds = {};
-                feeds[session.inputNames[0]] = audioTensor;
-                if (session.inputNames.length > 1) {
-                    feeds[session.inputNames[1]] = messageTensor;
-                }
-                const results = await session.run(feeds);
-
-                // Get encoded frame
-                const outputName = session.outputNames[0];
-                const encodedFrame = results[outputName].data;
-
-                // Copy to output
-                for (let i = 0; i < FRAME_SAMPLES && start + i < encoded.length; i++) {
-                    encoded[start + i] = encodedFrame[i];
-                }
+            // Run inference
+            const feeds = {};
+            feeds[session.inputNames[0]] = audioTensor;
+            if (session.inputNames.length > 1) {
+                feeds[session.inputNames[1]] = messageTensor;
             }
 
+            const results = await session.run(feeds);
+
+            // Get encoded output
+            const outputName = session.outputNames[0];
+            const outputData = results[outputName].data; // Float32Array
+
+            const encoded = new Float32Array(outputData);
             return { encoded };
         } catch (err) {
             console.error('Encoder inference error:', err);

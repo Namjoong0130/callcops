@@ -26,63 +26,57 @@ export default function SenderMode({ onBack }) {
     const [encodedUri, setEncodedUri] = useState(null);
     const [permissionGranted, setPermissionGranted] = useState(false);
     const [usedOnnx, setUsedOnnx] = useState(false);
+    const [encodingDiff, setEncodingDiff] = useState(0); // Added state
 
     const inference = useInference();
     const timerRef = useRef(null);
 
-    // Store raw PCM samples
+    // Audio Recording Ref for expo-av
+    const recordingRef = useRef(null);
+
+    // Store raw PCM samples (kept for compatibility, though used differently now)
     const pcmDataRef = useRef([]);
 
-    // Configure LiveAudioStream
+    // Stop recording on unmount
     useEffect(() => {
-        const options = {
-            sampleRate: TARGET_SAMPLE_RATE,
-            channels: 1,
-            bitsPerSample: 16,
-            audioSource: 6, // Voice Recognition
-            bufferSize: 4096,
-        };
-
-        LiveAudioStream.init(options);
-
-        LiveAudioStream.on('data', data => {
-            // 'data' is a base64 encoded string of PCM samples
-            const chunk = Buffer.from(data, 'base64');
-            const samples = new Int16Array(
-                chunk.buffer,
-                chunk.byteOffset,
-                chunk.byteLength / 2
-            );
-
-            // Convert to float [-1, 1] and append
-            const floatSamples = new Float32Array(samples.length);
-            for (let i = 0; i < samples.length; i++) {
-                floatSamples[i] = samples[i] / 32768.0;
-            }
-
-            // Push individual samples to array (simple but works for demo length)
-            // For production, use Float32Array concatenation helper
-            for (let i = 0; i < floatSamples.length; i++) {
-                pcmDataRef.current.push(floatSamples[i]);
-            }
-        });
-
         return () => {
-            LiveAudioStream.stop();
+            if (recordingRef.current) {
+                recordingRef.current.stopAndUnloadAsync();
+            }
         };
     }, []);
 
-    // Request permissions
+    // Request permissions and configure audio session
     useEffect(() => {
         (async () => {
+            try {
+                // Important for iOS Simulator recording
+                await Audio.setAudioModeAsync({
+                    allowsRecordingIOS: true,
+                    playsInSilentModeIOS: true,
+                    staysActiveInBackground: true,
+                    shouldDuckAndroid: true,
+                    playThroughEarpieceAndroid: false,
+                });
+                console.log('Audio mode configured for recording');
+            } catch (e) {
+                console.warn('Failed to set audio mode:', e);
+            }
+
             if (Platform.OS === 'android') {
                 const granted = await PermissionsAndroid.request(
                     PermissionsAndroid.PERMISSIONS.RECORD_AUDIO
                 );
                 setPermissionGranted(granted === PermissionsAndroid.RESULTS.GRANTED);
             } else {
-                const { status } = await Audio.requestPermissionsAsync();
-                setPermissionGranted(status === 'granted');
+                console.log('Requesting iOS permissions...');
+                const response = await Audio.requestPermissionsAsync();
+                console.log('Permission Response:', JSON.stringify(response, null, 2));
+
+                if (response.status !== 'granted') {
+                    Alert.alert('권한 오류', `마이크 권한 상태: ${response.status}\n설정에서 허용해주세요.`);
+                }
+                setPermissionGranted(response.status === 'granted');
             }
         })();
     }, []);
@@ -181,11 +175,11 @@ export default function SenderMode({ onBack }) {
         return fileUri;
     };
 
-    const handleStartRecording = () => {
+    const handleStartRecording = async () => {
         setErrorMessage(null);
         setUsedOnnx(false);
         setStatusText('');
-        pcmDataRef.current = [];
+        pcmDataRef.current = []; // Reset legacy ref just in case
 
         if (!permissionGranted) {
             setErrorMessage('마이크 권한이 필요합니다');
@@ -193,32 +187,105 @@ export default function SenderMode({ onBack }) {
         }
 
         try {
-            LiveAudioStream.start();
+            console.log('Starting expo-av recording...');
+            const { recording } = await Audio.Recording.createAsync({
+                android: {
+                    extension: '.wav',
+                    outputFormat: Audio.RECORDING_OPTION_ANDROID_OUTPUT_FORMAT_DEFAULT,
+                    audioEncoder: Audio.RECORDING_OPTION_ANDROID_AUDIO_ENCODER_DEFAULT,
+                    sampleRate: TARGET_SAMPLE_RATE,
+                    numberOfChannels: 1,
+                    bitRate: 256000,
+                },
+                ios: {
+                    extension: '.wav',
+                    audioQuality: Audio.RECORDING_OPTION_IOS_AUDIO_QUALITY_HIGH,
+                    sampleRate: TARGET_SAMPLE_RATE,
+                    numberOfChannels: 1,
+                    bitRate: 256000,
+                    linearPCMBitDepth: 16,
+                    linearPCMIsBigEndian: false,
+                    linearPCMIsFloat: false,
+                },
+                web: {
+                    mimeType: 'audio/wav',
+                    bitsPerSecond: 128000,
+                },
+            });
+
+            recordingRef.current = recording;
             setState('recording');
             setRecordingTime(0);
             timerRef.current = setInterval(() => setRecordingTime(p => p + 1), 1000);
+            console.log('Recording started successfully');
         } catch (err) {
-            console.error('Recording error:', err);
-            setErrorMessage(`녹음 오류: ${err.message}`);
+            console.error('Failed to start recording', err);
+            setErrorMessage('녹음 시작 실패: ' + err.message);
         }
     };
 
     const handleStopRecording = async () => {
         if (timerRef.current) clearInterval(timerRef.current);
+        if (!recordingRef.current) return;
 
         try {
-            LiveAudioStream.stop();
+            console.log('Stopping expo-av recording...');
+            await recordingRef.current.stopAndUnloadAsync();
+            const recordingUri = recordingRef.current.getURI();
             setState('encoding');
             setStatusText('오디오 데이터 처리 중...');
             setProgress(10);
 
-            // Wait a moment for last chunks
-            await new Promise(r => setTimeout(r, 200));
+            console.log('Recording stored at', recordingUri);
 
-            const rawSamples = new Float32Array(pcmDataRef.current);
-            console.log(`Captured ${rawSamples.length} samples at ${TARGET_SAMPLE_RATE}Hz`);
+            // Read file as base64
+            const base64Data = await FileSystem.readAsStringAsync(recordingUri, {
+                encoding: FileSystem.EncodingType.Base64,
+            });
 
-            if (rawSamples.length === 0) throw new Error('녹음된 데이터가 없습니다');
+            const buffer = Buffer.from(base64Data, 'base64');
+            // Skip WAV header (44 bytes) for simple raw extraction
+            // Note: iOS WAV might have different header size, but 44 is standard for canonical WAV.
+            // If it fails, we might need a proper WAV parser, but let's try 44 first.
+            const pcmBuffer = buffer.slice(44);
+            const view = new DataView(pcmBuffer.buffer, pcmBuffer.byteOffset, pcmBuffer.byteLength);
+            const numSamples = pcmBuffer.byteLength / 2;
+
+            let rawSamples = new Float32Array(numSamples);
+            for (let i = 0; i < numSamples; i++) {
+                const s = view.getInt16(i * 2, true);
+                rawSamples[i] = s / 32768.0;
+            }
+
+            recordingRef.current = null;
+            console.log(`Loaded ${rawSamples.length} samples from file`);
+
+            // Fallback for Simulator/No-Mic: Generate Test Tone
+            if (rawSamples.length === 0) {
+                console.warn('No audio captured. Generating test tone for debugging...');
+                Alert.alert('디버그 모드', '녹음 데이터가 없어 테스트음(삐-)을 생성합니다.');
+
+                // Generate 5 seconds of 440Hz sine wave
+                const duration = 5;
+                const sr = TARGET_SAMPLE_RATE;
+                rawSamples = new Float32Array(sr * duration);
+                for (let i = 0; i < rawSamples.length; i++) {
+                    rawSamples[i] = Math.sin(2 * Math.PI * 440 * i / sr) * 0.5;
+                }
+            }
+
+            // Check amplitude
+            let maxAmp = 0;
+            let avgAmp = 0;
+            for (let i = 0; i < rawSamples.length; i++) {
+                const abs = Math.abs(rawSamples[i]);
+                if (abs > maxAmp) maxAmp = abs;
+                avgAmp += abs;
+            }
+            avgAmp /= rawSamples.length;
+            console.log(`Mic Amplitude - Max: ${maxAmp.toFixed(4)}, Avg: ${avgAmp.toFixed(4)}`);
+
+            if (maxAmp < 0.001) console.warn('Warning: Audio seems to be silence!');
 
             // Resample
             const audio8k = resampleTo8kHz(rawSamples);
@@ -248,6 +315,23 @@ export default function SenderMode({ onBack }) {
             } else {
                 setStatusText('Fallback 인코딩...');
                 encoded = embedWatermarkSimple(audio8k, messageBits);
+            }
+
+            // Verify encoding changes
+            let diffSum = 0;
+            let maxVal = 0;
+            for (let i = 0; i < Math.min(audio8k.length, encoded.length); i++) {
+                diffSum += Math.abs(audio8k[i] - encoded[i]);
+                if (Math.abs(encoded[i]) > maxVal) maxVal = Math.abs(encoded[i]);
+            }
+            console.log(`Encoding Diff Total: ${diffSum.toFixed(4)}`);
+            console.log(`Max Encoded Value: ${maxVal.toFixed(4)}`);
+
+            setEncodingDiff(diffSum);
+
+            if (diffSum < 0.0001) {
+                console.warn('Warning: Encoded audio identical to input!');
+                Alert.alert('주의', '워터마크가 거의 심어지지 않았습니다. (Diff ≈ 0)');
             }
 
             setProgress(80);
