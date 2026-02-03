@@ -1,0 +1,136 @@
+# CallCops: Causal Model Configuration
+# ======================================
+# True Causal Architecture for Zero-Latency Real-Time Streaming
+#
+# 주요 특징:
+# - InstanceNorm1d: 스트리밍 추론 안정성
+# - Left-only padding: Zero look-ahead
+# - 단일 프레임 실시간 처리 가능
+#
+# 사용법:
+#   python scripts/train_causal.py \
+#     --config configs/causal.yaml \
+#     --batch_size 24 \
+#     --num_workers 4
+#
+# 백그라운드 실행:
+#   nohup stdbuf -oL python scripts/train_causal.py \
+#     --config configs/causal.yaml \
+#     --batch_size 24 \
+#     --num_workers 4 \
+#     > training_causal.log 2>&1 &
+
+# 오디오 규격
+audio:
+  sample_rate: 8000
+  bit_depth: 16
+  channels: 1
+  frame_ms: 40
+  frame_samples: 320
+
+# 워터마크 페이로드
+watermark:
+  bits_per_frame: 1
+  payload_length: 128
+  sync_pattern: "1010101010101010"
+
+# Causal 모델 아키텍처
+model:
+  type: "causal"                    # Non-causal vs Causal 구분
+  norm_type: "instance"             # instance, batch, layer
+  
+  encoder:
+    channels: [32, 64, 128, 256]
+    kernel_size: 7
+    num_residual_blocks: 4
+    
+  decoder:
+    channels: [32, 64, 128, 256]
+    kernel_size: 5
+    num_residual_blocks: 4
+
+  discriminator:
+    channels: [16, 32, 64, 128]
+    use_discriminator: true
+
+# 학습 설정
+training:
+  batch_size: 24
+  learning_rate: 0.0001             # 1e-4 (초기 학습)
+  num_workers: 4
+  adam_betas: [0.5, 0.9]
+  lr_scheduler: "cosine"
+  warmup_epochs: 5
+  epochs: 100
+  grad_clip: 1.0
+  use_amp: true                     # Mixed Precision (BF16)
+  
+  # ═══════════════════════════════════════════════════
+  # 손실 함수 가중치 (Lambda Values)
+  # ═══════════════════════════════════════════════════
+  # 전략: Audio-Priority (SNR 우선, BER은 BCH 허용 범위 내에서 관리)
+  #
+  # lambda_bit:   2.0   — 비트 임베딩 압박 완화
+  # lambda_audio: 50.0  — Mel Loss (지각적 품질)
+  # lambda_stft:  10.0  — 스펙트럼 보존
+  # lambda_l1:    10.0  — Waveform 직접 보존
+  # lambda_adv:   0.05  — GAN 안정성
+  # lambda_det:   0.1   — Detection 정확도
+  # ═══════════════════════════════════════════════════
+  lambda_bit: 2.0                   # BCE loss for bit accuracy
+  lambda_audio: 50.0                # Mel Loss (perceptual quality)
+  lambda_stft: 10.0                 # Multi-resolution STFT loss
+  lambda_l1: 10.0                   # L1 waveform loss → SNR
+  lambda_adv: 0.05                  # Adversarial loss (GAN)
+  lambda_det: 0.1                   # Detection accuracy
+  
+  # SNR 목표
+  target_snr_db: 25.0               # 최소 25dB SNR 목표
+  
+  # Encoder Alpha (perturbation scale)
+  encoder_alpha: 0.25               # 물리적 강도 제한
+  
+  # Early stopping
+  early_stopping:
+    enabled: true
+    monitor: "val_snr"              # SNR 기반 모니터링
+    min_snr: 15.0                   # 15dB 미만이면 카운트
+    patience: 10                    # 10 에포크 연속 → 종료
+
+# 데이터 증강
+augmentation:
+  codec_simulation: true            # Opus, AMR 등 VoIP 코덱 시뮬레이션
+  noise_injection: true             # 배경 노이즈 추가
+  noise_snr_range: [10, 30]         # SNR 범위 (dB)
+  time_stretch: false               # VoIP에서는 사용하지 않음
+  pitch_shift: false                # VoIP에서는 사용하지 않음
+
+# 데이터 경로
+data:
+  train_dir: "data/raw/training"
+  val_dir: "data/raw/validation"
+  test_dir: "data/raw/test"
+
+# 체크포인트
+checkpoint:
+  save_dir: "checkpoints/causal"
+  save_every: 1                     # 매 epoch마다 저장
+  keep_last: 5                      # 최근 5개 유지
+
+# 로깅
+logging:
+  log_dir: "logs/causal"
+  log_every: 100                    # 100 step마다 로깅
+  tensorboard: true
+  wandb: false                      # Weights & Biases 사용 여부
+
+# 평가
+evaluation:
+  eval_every: 1                     # 매 epoch마다 평가
+  streaming_test: true              # 스트리밍 일관성 테스트
+  
+  metrics:
+    - snr_db
+    - ber                           # Bit Error Rate
+    - pesq                          # Perceptual Evaluation
+    - stoi                          # Short-Time Objective Intelligibility

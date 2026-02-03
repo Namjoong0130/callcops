@@ -5,7 +5,7 @@
  * Supports both Embed (encoder) and Detect (decoder) modes.
  */
 
-import { useState, useCallback, useEffect } from 'react';
+import { useState, useCallback, useEffect, useRef, useMemo } from 'react';
 import { useAudioCapture } from './hooks/useAudioCapture';
 import { useInference } from './hooks/useInference';
 import { WaveformView } from './components/WaveformView';
@@ -31,10 +31,102 @@ function MainApp() {
   const [currentBitIndex, setCurrentBitIndex] = useState(-1); // Current bit during playback
   const [currentFrameIndex, setCurrentFrameIndex] = useState(-1); // NEW: Current frame
   const [isPlaying, setIsPlaying] = useState(false);
+  const [isDetecting, setIsDetecting] = useState(false);
   const [originalMessage, setOriginalMessage] = useState(null);  // Store embedded message for comparison
 
   const audioCapture = useAudioCapture();
   const inference = useInference();
+  const waveformRef = useRef(null);
+
+  // Compute detection state from pre-computed frameProbs + current playback position
+  const detectionState = useMemo(() => {
+    if (!currentFrameProbs || currentFrameIndex < 0) return null;
+
+    const PL = 128;
+    const accumulated = new Float32Array(PL).fill(0);
+    const counts = new Float32Array(PL).fill(0);
+
+    // Accumulate all frames up to currentFrameIndex
+    const endFrame = Math.min(currentFrameIndex + 1, currentFrameProbs.length);
+    for (let i = 0; i < endFrame; i++) {
+      const bitIdx = i % PL;
+      accumulated[bitIdx] += currentFrameProbs[i];
+      counts[bitIdx] += 1;
+    }
+
+    // Average
+    for (let i = 0; i < PL; i++) {
+      if (counts[i] > 0) {
+        accumulated[i] /= counts[i];
+      } else {
+        accumulated[i] = 0.5;
+      }
+    }
+
+    // Current cycle info
+    const cycleFrame = currentFrameIndex % PL;
+    const cycleCount = Math.floor(currentFrameIndex / PL);
+
+    // Current cycle's raw bit probs (-1 = not yet predicted)
+    const cycleBitProbs = new Float32Array(PL).fill(-1);
+    const cycleStartFrame = cycleCount * PL;
+    for (let i = cycleStartFrame; i <= currentFrameIndex && i < currentFrameProbs.length; i++) {
+      const bitIdx = i % PL;
+      cycleBitProbs[bitIdx] = currentFrameProbs[i];
+    }
+
+    return { accumulated, counts, cycleBitProbs, cycleFrame, cycleCount };
+  }, [currentFrameProbs, currentFrameIndex]);
+
+  // Sync detectionState.accumulated → currentBitProbs during detection
+  useEffect(() => {
+    if (isDetecting && detectionState) {
+      setCurrentBitProbs(detectionState.accumulated);
+    }
+  }, [isDetecting, detectionState]);
+
+  // Start synchronized detection: pre-compute all frameProbs, then play
+  const handleStartDetection = useCallback(async () => {
+    if (!audioCapture.audioData) return;
+
+    try {
+      // Run decoder on full audio if not already done
+      let frameProbs = currentFrameProbs;
+      if (!frameProbs) {
+        setDetectMode('processing');
+        if (!inference.isReady) {
+          await inference.loadDecoder();
+        }
+        const result = await inference.runDecoder(audioCapture.audioData);
+        setCurrentFrameProbs(result.frameProbs);
+        setFrameInfo({ numFrames: result.numFrames, cycleCoverage: result.cycleCoverage });
+        frameProbs = result.frameProbs;
+        setDetectMode('idle');
+      }
+
+      // Start synced playback
+      setIsDetecting(true);
+      setCurrentFrameIndex(0);
+      setCurrentBitIndex(0);
+
+      if (waveformRef.current) {
+        waveformRef.current.seekTo(0);
+        // Small delay to let seekTo settle before playing
+        setTimeout(() => waveformRef.current?.play(), 50);
+      }
+    } catch (err) {
+      console.error('Start detection failed:', err);
+      setDetectMode('idle');
+    }
+  }, [audioCapture.audioData, currentFrameProbs, inference]);
+
+  // Stop synchronized detection
+  const handleStopDetection = useCallback(() => {
+    setIsDetecting(false);
+    if (waveformRef.current) {
+      waveformRef.current.pause();
+    }
+  }, []);
 
   // Handle real-time audio chunks from microphone
   const handleAudioChunk = useCallback(async (chunk) => {
@@ -112,11 +204,16 @@ function MainApp() {
   const handlePlayStateChange = useCallback((playing) => {
     setIsPlaying(playing);
     if (!playing) {
-      // When stopped, show all bits
-      setCurrentBitIndex(-1);
-      setCurrentFrameIndex(-1);
+      if (isDetecting) {
+        // Playback ended naturally — stop detecting but preserve final state
+        setIsDetecting(false);
+      } else {
+        // Normal playback stopped — reset indices
+        setCurrentBitIndex(-1);
+        setCurrentFrameIndex(-1);
+      }
     }
-  }, []);
+  }, [isDetecting]);
 
   // Random position detection - proves watermark works from any position
   const [randomPosition, setRandomPosition] = useState(null);
@@ -219,7 +316,12 @@ function MainApp() {
   };
 
   // Handle verify (switch to detect mode and run decoder)
-  const handleVerify = async (audioData) => {
+  // Optional embeddedMessage param: the original unrotated message used during embedding
+  // (passed by RealtimeEmbedDemo to override the rotated messages set during streaming)
+  const handleVerify = async (audioData, embeddedMessage) => {
+    if (embeddedMessage) {
+      setOriginalMessage(embeddedMessage);
+    }
     setAppMode('detect');
 
     // Small delay to allow UI update
@@ -320,6 +422,7 @@ function MainApp() {
             <div>
               <EmbedPanel
                 onEmbed={handleEmbed}
+                createStreamingEncoder={inference.createStreamingEncoder}
                 onVerify={handleVerify}
                 isLoading={inference.isLoading}
                 isModelReady={true}
@@ -418,19 +521,17 @@ function MainApp() {
               </button>
             </div>
 
-            {/* Progressive Detection - Animated Real-time Effect */}
+            {/* Progressive Detection - Synced with playback */}
             {audioCapture.audioData && (
               <ProgressiveDetection
                 audioData={audioCapture.audioData}
-                onRunDecoder={inference.runDecoder}
-                onProgressUpdate={(bits, frame) => {
-                  setCurrentBitProbs(bits);
-                  setCurrentFrameIndex(frame);
-                }}
-                onComplete={(finalBits) => {
-                  setCurrentBitProbs(finalBits);
-                  setDetectMode('idle');
-                }}
+                isDetecting={isDetecting}
+                detectionState={detectionState}
+                currentFrameIndex={currentFrameIndex}
+                totalFrames={currentFrameProbs ? currentFrameProbs.length : 0}
+                onStartDetection={handleStartDetection}
+                onStopDetection={handleStopDetection}
+                isModelReady={inference.isReady}
               />
             )}
 
@@ -438,6 +539,7 @@ function MainApp() {
             <section className="glass rounded-2xl p-12">
               <h2 className="text-lg font-semibold text-gray-200 mb-4">Waveform Analysis</h2>
               <WaveformView
+                ref={waveformRef}
                 audioData={audioCapture.audioData}
                 bitProbs={currentBitProbs}
                 frameProbs={currentFrameProbs}
@@ -458,6 +560,10 @@ function MainApp() {
                   currentBitIndex={isPlaying ? currentBitIndex : -1}
                   isProgressive={true}
                   isPlaying={isPlaying}
+                  cycleMode={isDetecting}
+                  cycleBitProbs={detectionState?.cycleBitProbs}
+                  cycleFrame={detectionState?.cycleFrame ?? -1}
+                  cycleCount={detectionState?.cycleCount ?? 0}
                 />
               </div>
 

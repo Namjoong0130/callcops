@@ -535,6 +535,10 @@ class CallCopsWatermarkDataset(Dataset):
     워터마킹 학습용 데이터셋
 
     CallCopsDataset을 래핑하여 워터마크 페이로드 생성 추가.
+    
+    Segmentation Mode:
+    - split_long_audio=True: 긴 오디오를 max_frames 단위로 쪼개서 여러 샘플로 활용
+    - split_long_audio=False: 랜덤 세그먼트 추출 (기존 방식)
 
     Returns:
         dict containing:
@@ -549,27 +553,80 @@ class CallCopsWatermarkDataset(Dataset):
         base_dataset: CallCopsDataset,
         payload_generator: Optional[PayloadGenerator] = None,
         frame_ms: int = 40,
-        max_frames: int = 128
+        max_frames: int = 128,
+        split_long_audio: bool = True,  # 긴 오디오 쪼개기 활성화
+        overlap_ratio: float = 0.0      # 세그먼트 간 오버랩 (0.0 = 없음, 0.5 = 50%)
     ):
         self.base_dataset = base_dataset
         self.payload_generator = payload_generator or PayloadGenerator()
         self.frame_ms = frame_ms
         self.max_frames = max_frames
         self.frame_samples = int(base_dataset.sample_rate * frame_ms / 1000)
+        self.max_samples = self.max_frames * self.frame_samples
+        self.split_long_audio = split_long_audio
+        self.overlap_ratio = overlap_ratio
+        
+        # 세그먼트 인덱스 맵 생성 (split_long_audio=True일 때)
+        self.segment_map = []  # [(base_idx, start_sample), ...]
+        self._build_segment_map()
+    
+    def _build_segment_map(self):
+        """
+        긴 오디오를 세그먼트로 쪼개는 인덱스 맵 생성.
+        
+        예: 10초 오디오 (80,000 samples) → 2개 세그먼트 (각 40,960 samples)
+        """
+        if not self.split_long_audio:
+            # 기존 방식: 1:1 매핑
+            self.segment_map = [(i, -1) for i in range(len(self.base_dataset))]
+            return
+        
+        hop_samples = int(self.max_samples * (1 - self.overlap_ratio))
+        
+        for base_idx in range(len(self.base_dataset)):
+            # 오디오 길이 가져오기 (메타데이터에서)
+            item = self.base_dataset.items[base_idx]
+            duration = item.get("duration", 0)
+            audio_samples = int(duration * self.base_dataset.sample_rate)
+            
+            if audio_samples <= self.max_samples:
+                # 짧은 오디오: 그대로 사용
+                self.segment_map.append((base_idx, 0))
+            else:
+                # 긴 오디오: 쪼개기
+                start = 0
+                while start + self.max_samples <= audio_samples:
+                    self.segment_map.append((base_idx, start))
+                    start += hop_samples
+                
+                # 마지막 세그먼트 (끝에서 max_samples)
+                if start < audio_samples:
+                    last_start = audio_samples - self.max_samples
+                    if last_start > self.segment_map[-1][1]:  # 중복 방지
+                        self.segment_map.append((base_idx, last_start))
+        
+        print(f"[Segmentation] {len(self.base_dataset)} audios → {len(self.segment_map)} segments")
 
     def __len__(self) -> int:
-        return len(self.base_dataset)
+        return len(self.segment_map)
 
     def __getitem__(self, idx: int) -> Dict[str, Any]:
-        audio, text, speaker_type = self.base_dataset[idx]
+        base_idx, start_sample = self.segment_map[idx]
+        audio, text, speaker_type = self.base_dataset[base_idx]
 
-        # 최대 길이 제한
-        max_samples = self.max_frames * self.frame_samples
-
-        if audio.shape[-1] > max_samples:
-            # 랜덤 세그먼트 추출
-            start = random.randint(0, audio.shape[-1] - max_samples)
-            audio = audio[:, start:start + max_samples]
+        if start_sample == -1:
+            # 기존 방식: 랜덤 세그먼트 추출
+            if audio.shape[-1] > self.max_samples:
+                start = random.randint(0, audio.shape[-1] - self.max_samples)
+                audio = audio[:, start:start + self.max_samples]
+        else:
+            # 쪼개기 방식: 지정된 위치에서 추출
+            end_sample = start_sample + self.max_samples
+            if end_sample <= audio.shape[-1]:
+                audio = audio[:, start_sample:end_sample]
+            else:
+                # 오디오가 예상보다 짧은 경우 (안전 처리)
+                audio = audio[:, start_sample:]
 
         # 페이로드 생성
         bits = self.payload_generator.generate(batch_size=1).squeeze(0)
@@ -655,6 +712,9 @@ def create_dataloader(
     augmentation_config: Optional[Dict[str, Any]] = None,
     for_watermarking: bool = True,
     pin_memory: bool = True,
+    max_frames: int = 128,
+    split_long_audio: bool = True,
+    overlap_ratio: float = 0.0,
     **kwargs
 ) -> DataLoader:
     """
@@ -670,6 +730,9 @@ def create_dataloader(
         augmentation_config: 증강 설정
         for_watermarking: 워터마킹 데이터셋 사용 여부
         pin_memory: GPU 전송 가속 여부
+        max_frames: 최대 프레임 수 (128 = 5.12초 @ 8kHz)
+        split_long_audio: True면 긴 오디오를 쪼개서 여러 샘플로 활용
+        overlap_ratio: 세그먼트 간 오버랩 비율 (0.0 = 없음)
         **kwargs: CallCopsDataset에 전달할 추가 인자
 
     Returns:
@@ -693,7 +756,12 @@ def create_dataloader(
 
     # 워터마킹 데이터셋 래핑
     if for_watermarking:
-        dataset = CallCopsWatermarkDataset(base_dataset)
+        dataset = CallCopsWatermarkDataset(
+            base_dataset,
+            max_frames=max_frames,
+            split_long_audio=split_long_audio,
+            overlap_ratio=overlap_ratio
+        )
         collate = collate_fn_watermark
     else:
         dataset = base_dataset
