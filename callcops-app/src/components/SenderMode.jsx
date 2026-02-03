@@ -28,15 +28,26 @@ export default function SenderMode({ onBack }) {
     const [encodedUri, setEncodedUri] = useState(null);
     const [permissionGranted, setPermissionGranted] = useState(false);
     const [usedOnnx, setUsedOnnx] = useState(false);
-    const [encodingDiff, setEncodingDiff] = useState(0); // Added state
+    const [encodingDiff, setEncodingDiff] = useState(0);
+
+    // Real-time visualization state
+    const [inputWaveform, setInputWaveform] = useState(new Array(30).fill(0));
+    const [outputWaveform, setOutputWaveform] = useState(new Array(30).fill(0));
+    const [currentBitIndex, setCurrentBitIndex] = useState(0);
 
     const inference = useInference();
     const timerRef = useRef(null);
 
-    // Audio Recording Ref for expo-av
+    // Audio Recording Ref for expo-av (kept for fallback/compatibility)
     const recordingRef = useRef(null);
 
-    // Store raw PCM samples (kept for compatibility, though used differently now)
+    // Real-time processing refs
+    const inputBufferRef = useRef([]);           // Incoming PCM samples buffer
+    const encodedBufferRef = useRef([]);         // All encoded samples
+    const messageBitsRef = useRef(null);         // 128-bit message
+    const frameIndexRef = useRef(0);             // Current frame count
+
+    // Store raw PCM samples (kept for compatibility)
     const pcmDataRef = useRef([]);
 
     // Stop recording on unmount
@@ -177,11 +188,59 @@ export default function SenderMode({ onBack }) {
         return fileUri;
     };
 
+    // Constants for frame-based processing
+    const FRAME_SIZE = 320; // 40ms at 8kHz
+    const WATERMARK_STRENGTH = 0.02;
+
+    // Process incoming audio chunk frame-by-frame (real-time encoding)
+    const processAudioChunk = (pcmSamples) => {
+        if (!messageBitsRef.current) return;
+
+        // Add samples to input buffer
+        inputBufferRef.current.push(...pcmSamples);
+
+        // Process complete frames
+        while (inputBufferRef.current.length >= FRAME_SIZE) {
+            const frame = inputBufferRef.current.splice(0, FRAME_SIZE);
+            const bitIdx = frameIndexRef.current % 128;
+            const bit = messageBitsRef.current[bitIdx];
+
+            // Encode frame with watermark
+            const encodedFrame = frame.map((sample, i) => {
+                const watermark = bit ? WATERMARK_STRENGTH : -WATERMARK_STRENGTH;
+                return sample + watermark * Math.sin(2 * Math.PI * (frameIndexRef.current * FRAME_SIZE + i) / 10);
+            });
+
+            // Accumulate encoded samples
+            encodedBufferRef.current.push(...encodedFrame);
+            frameIndexRef.current++;
+
+            // Update visualization (every few frames to avoid too many state updates)
+            if (frameIndexRef.current % 4 === 0) {
+                setCurrentBitIndex(bitIdx);
+
+                // Calculate amplitude for visualization (last 30 values)
+                const inputAmps = frame.filter((_, i) => i % 10 === 0).slice(-30).map(s => Math.abs(s));
+                const outputAmps = encodedFrame.filter((_, i) => i % 10 === 0).slice(-30).map(s => Math.abs(s));
+
+                setInputWaveform(prev => [...prev.slice(-20), ...inputAmps].slice(-30));
+                setOutputWaveform(prev => [...prev.slice(-20), ...outputAmps].slice(-30));
+            }
+        }
+    };
+
     const handleStartRecording = async () => {
         setErrorMessage(null);
         setUsedOnnx(false);
         setStatusText('');
-        pcmDataRef.current = []; // Reset legacy ref just in case
+
+        // Reset all buffers
+        inputBufferRef.current = [];
+        encodedBufferRef.current = [];
+        frameIndexRef.current = 0;
+        setInputWaveform(new Array(30).fill(0));
+        setOutputWaveform(new Array(30).fill(0));
+        setCurrentBitIndex(0);
 
         if (!permissionGranted) {
             setErrorMessage('마이크 권한이 필요합니다');
@@ -189,37 +248,40 @@ export default function SenderMode({ onBack }) {
         }
 
         try {
-            console.log('Starting expo-av recording...');
-            const { recording } = await Audio.Recording.createAsync({
-                android: {
-                    extension: '.wav',
-                    outputFormat: Audio.RECORDING_OPTION_ANDROID_OUTPUT_FORMAT_DEFAULT,
-                    audioEncoder: Audio.RECORDING_OPTION_ANDROID_AUDIO_ENCODER_DEFAULT,
-                    sampleRate: TARGET_SAMPLE_RATE,
-                    numberOfChannels: 1,
-                    bitRate: 256000,
-                },
-                ios: {
-                    extension: '.wav',
-                    audioQuality: Audio.RECORDING_OPTION_IOS_AUDIO_QUALITY_HIGH,
-                    sampleRate: TARGET_SAMPLE_RATE,
-                    numberOfChannels: 1,
-                    bitRate: 256000,
-                    linearPCMBitDepth: 16,
-                    linearPCMIsBigEndian: false,
-                    linearPCMIsFloat: false,
-                },
-                web: {
-                    mimeType: 'audio/wav',
-                    bitsPerSecond: 128000,
-                },
+            // Generate 128-bit message upfront
+            const bits = generateMessage();
+            messageBitsRef.current = bits;
+            setBitProbs(bits.map(b => b ? 1.0 : 0.0));
+
+            // Initialize LiveAudioStream
+            LiveAudioStream.init({
+                sampleRate: DOWNSAMPLE_RATE, // 8kHz for direct processing
+                channels: 1,
+                bitsPerSample: 16,
+                audioSource: 6, // VOICE_COMMUNICATION
+                bufferSize: 2048,
             });
 
-            recordingRef.current = recording;
+            // Handle incoming audio data
+            LiveAudioStream.on('data', (base64Data) => {
+                try {
+                    const buffer = Buffer.from(base64Data, 'base64');
+                    const samples = [];
+                    for (let i = 0; i < buffer.length; i += 2) {
+                        const sample = buffer.readInt16LE(i) / 32768.0;
+                        samples.push(sample);
+                    }
+                    processAudioChunk(samples);
+                } catch (e) {
+                    console.warn('Audio chunk processing error:', e);
+                }
+            });
+
+            LiveAudioStream.start();
             setState('recording');
             setRecordingTime(0);
             timerRef.current = setInterval(() => setRecordingTime(p => p + 1), 1000);
-            console.log('Recording started successfully');
+            console.log('Real-time recording started');
         } catch (err) {
             console.error('Failed to start recording', err);
             setErrorMessage('녹음 시작 실패: ' + err.message);
@@ -228,123 +290,34 @@ export default function SenderMode({ onBack }) {
 
     const handleStopRecording = async () => {
         if (timerRef.current) clearInterval(timerRef.current);
-        if (!recordingRef.current) return;
 
         try {
-            console.log('Stopping expo-av recording...');
-            await recordingRef.current.stopAndUnloadAsync();
-            const recordingUri = recordingRef.current.getURI();
+            console.log('Stopping real-time recording...');
+            LiveAudioStream.stop();
             setState('encoding');
-            setStatusText('오디오 데이터 처리 중...');
-            setProgress(10);
+            setStatusText('파일 저장 중...');
+            setProgress(50);
 
-            console.log('Recording stored at', recordingUri);
+            const encoded = encodedBufferRef.current;
+            console.log(`Total encoded samples: ${encoded.length}`);
 
-            // Read file as base64
-            const base64Data = await FileSystem.readAsStringAsync(recordingUri, {
-                encoding: FileSystem.EncodingType.Base64,
-            });
-
-            const buffer = Buffer.from(base64Data, 'base64');
-            // Skip WAV header (44 bytes) for simple raw extraction
-            // Note: iOS WAV might have different header size, but 44 is standard for canonical WAV.
-            // If it fails, we might need a proper WAV parser, but let's try 44 first.
-            const pcmBuffer = buffer.slice(44);
-            const view = new DataView(pcmBuffer.buffer, pcmBuffer.byteOffset, pcmBuffer.byteLength);
-            const numSamples = pcmBuffer.byteLength / 2;
-
-            let rawSamples = new Float32Array(numSamples);
-            for (let i = 0; i < numSamples; i++) {
-                const s = view.getInt16(i * 2, true);
-                rawSamples[i] = s / 32768.0;
-            }
-
-            recordingRef.current = null;
-            console.log(`Loaded ${rawSamples.length} samples from file`);
-
-            // Fallback for Simulator/No-Mic: Generate Test Tone
-            if (rawSamples.length === 0) {
-                console.warn('No audio captured. Generating test tone for debugging...');
-                Alert.alert('디버그 모드', '녹음 데이터가 없어 테스트음(삐-)을 생성합니다.');
-
-                // Generate 5 seconds of 440Hz sine wave
-                const duration = 5;
-                const sr = TARGET_SAMPLE_RATE;
-                rawSamples = new Float32Array(sr * duration);
-                for (let i = 0; i < rawSamples.length; i++) {
-                    rawSamples[i] = Math.sin(2 * Math.PI * 440 * i / sr) * 0.5;
-                }
-            }
-
-            // Check amplitude
-            let maxAmp = 0;
-            let avgAmp = 0;
-            for (let i = 0; i < rawSamples.length; i++) {
-                const abs = Math.abs(rawSamples[i]);
-                if (abs > maxAmp) maxAmp = abs;
-                avgAmp += abs;
-            }
-            avgAmp /= rawSamples.length;
-            console.log(`Mic Amplitude - Max: ${maxAmp.toFixed(4)}, Avg: ${avgAmp.toFixed(4)}`);
-
-            if (maxAmp < 0.001) console.warn('Warning: Audio seems to be silence!');
-
-            // Resample
-            const audio8k = resampleTo8kHz(rawSamples);
-            console.log(`Resampled to ${audio8k.length} samples at 8kHz`);
-            setProgress(30);
-
-            const messageBits = generateMessage();
-            setBitProbs(messageBits.map(b => b ? 1.0 : 0.0));
-            setProgress(40);
-
-            let encoded;
-            if (inference.onnxAvailable) {
-                try {
-                    setStatusText('ONNX 인코딩 중...');
-                    await inference.loadEncoder();
-                    setProgress(60);
-
-                    const result = await inference.runEncoder(audio8k, messageBits);
-                    encoded = result.encoded;
-                    setUsedOnnx(true);
-                    console.log('ONNX encoding successful');
-                } catch (e) {
-                    console.warn('ONNX failed:', e);
-                    setStatusText('Fallback 인코딩...');
-                    encoded = embedWatermarkSimple(audio8k, messageBits);
-                }
-            } else {
-                setStatusText('Fallback 인코딩...');
-                encoded = embedWatermarkSimple(audio8k, messageBits);
-            }
-
-            // Verify encoding changes
-            let diffSum = 0;
-            let maxVal = 0;
-            for (let i = 0; i < Math.min(audio8k.length, encoded.length); i++) {
-                diffSum += Math.abs(audio8k[i] - encoded[i]);
-                if (Math.abs(encoded[i]) > maxVal) maxVal = Math.abs(encoded[i]);
-            }
-            console.log(`Encoding Diff Total: ${diffSum.toFixed(4)}`);
-            console.log(`Max Encoded Value: ${maxVal.toFixed(4)}`);
-
-            setEncodingDiff(diffSum);
-
-            if (diffSum < 0.0001) {
-                console.warn('Warning: Encoded audio identical to input!');
-                Alert.alert('주의', '워터마크가 거의 심어지지 않았습니다. (Diff ≈ 0)');
+            if (encoded.length === 0) {
+                console.warn('No audio captured.');
+                Alert.alert('오류', '녹음된 오디오가 없습니다.');
+                setState('idle');
+                return;
             }
 
             setProgress(80);
-            setStatusText('저장 중...');
-            const uri = await createWavFile(encoded);
+            setStatusText('WAV 파일 생성 중...');
+            const uri = await createWavFile(new Float32Array(encoded));
             setEncodedUri(uri);
             setProgress(100);
             setState('complete');
+            console.log('Encoded file saved:', uri);
 
         } catch (err) {
-            console.error('Encoding error:', err);
+            console.error('Stop recording error:', err);
             setErrorMessage(`오류: ${err.message}`);
             setState('idle');
         }
@@ -451,7 +424,7 @@ export default function SenderMode({ onBack }) {
         );
     }
 
-    // RECORDING STATE
+    // RECORDING STATE - Live Visualization
     if (state === 'recording') {
         return (
             <View style={styles.container}>
@@ -467,16 +440,45 @@ export default function SenderMode({ onBack }) {
 
                 <View style={styles.recordingBadge}>
                     <View style={styles.recordingDot} />
-                    <Text style={styles.recordingText}>Recording (PCM)</Text>
+                    <Text style={styles.recordingText}>실시간 인코딩 중</Text>
                 </View>
 
                 <View style={styles.centerContent}>
                     <Text style={styles.timer}>{formatTime(recordingTime)}</Text>
+
+                    {/* Input Audio Waveform */}
+                    <Text style={styles.waveformLabel}>📥 입력 오디오</Text>
                     <View style={styles.waveform}>
-                        {Array(20).fill(0).map((_, i) => (
+                        {inputWaveform.map((amp, i) => (
+                            <View
+                                key={`in-${i}`}
+                                style={[styles.waveBar, styles.inputWaveBar, { height: Math.max(4, amp * 150) }]}
+                            />
+                        ))}
+                    </View>
+
+                    {/* Bit Matrix with Highlighted Current Bit */}
+                    <Text style={styles.waveformLabel}>🔢 비트 매트릭스 (현재: {currentBitIndex}/128)</Text>
+                    <View style={styles.bitMatrix}>
+                        {(bitProbs || Array(128).fill(0.5)).map((prob, i) => (
                             <View
                                 key={i}
-                                style={[styles.waveBar, { height: 20 + Math.random() * 30 }]}
+                                style={[
+                                    styles.bit,
+                                    { backgroundColor: prob > 0.5 ? '#22c55e' : '#ef4444' },
+                                    i === currentBitIndex && styles.currentBit
+                                ]}
+                            />
+                        ))}
+                    </View>
+
+                    {/* Output Audio Waveform */}
+                    <Text style={styles.waveformLabel}>📤 인코딩된 오디오</Text>
+                    <View style={styles.waveform}>
+                        {outputWaveform.map((amp, i) => (
+                            <View
+                                key={`out-${i}`}
+                                style={[styles.waveBar, styles.outputWaveBar, { height: Math.max(4, amp * 150) }]}
                             />
                         ))}
                     </View>
@@ -485,7 +487,7 @@ export default function SenderMode({ onBack }) {
                 <TouchableOpacity onPress={handleStopRecording} style={styles.stopButton}>
                     <View style={styles.stopIcon} />
                 </TouchableOpacity>
-                <Text style={styles.stopLabel}>Stop & Encode</Text>
+                <Text style={styles.stopLabel}>녹음 중지</Text>
             </View>
         );
     }
@@ -760,6 +762,23 @@ const styles = StyleSheet.create({
         width: 10,
         height: 10,
         borderRadius: 2,
+    },
+    currentBit: {
+        borderWidth: 2,
+        borderColor: '#fff',
+        transform: [{ scale: 1.3 }],
+    },
+    waveformLabel: {
+        color: '#d1d5db',
+        fontSize: 12,
+        marginTop: 12,
+        marginBottom: 4,
+    },
+    inputWaveBar: {
+        backgroundColor: '#60a5fa', // Blue for input
+    },
+    outputWaveBar: {
+        backgroundColor: '#a78bfa', // Purple for encoded output
     },
     successCircle: {
         width: 96,
