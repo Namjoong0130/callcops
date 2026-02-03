@@ -367,21 +367,23 @@ class CausalFrameWiseFusionBlock(nn.Module):
     def forward(
         self,
         audio_feat: torch.Tensor,
-        message: torch.Tensor
+        message: torch.Tensor,
+        frame_offset: int = 0
     ) -> torch.Tensor:
         """
         Args:
             audio_feat: [B, C, T] - 오디오 피처
             message: [B, 128] - 128비트 페이로드
+            frame_offset: 스트리밍 시 현재 프레임 인덱스 (cyclic bit alignment용)
 
         Returns:
             fused: [B, C, T] - 비트 정보가 융합된 피처
         """
         B, C, T = audio_feat.shape
 
-        # Frame indices (cyclic)
+        # Frame indices (cyclic) with offset for streaming
         num_frames = T // self.frame_samples
-        frame_indices = torch.arange(num_frames, device=audio_feat.device) % self.message_dim
+        frame_indices = (torch.arange(num_frames, device=audio_feat.device) + frame_offset) % self.message_dim
         frame_bits = message[:, frame_indices]  # [B, num_frames]
 
         # Embed bits
@@ -580,7 +582,8 @@ class CausalEncoder(nn.Module):
     def forward(
         self,
         audio: torch.Tensor,
-        message: torch.Tensor
+        message: torch.Tensor,
+        frame_offset: int = 0
     ) -> torch.Tensor:
         """
         Causal 40ms 프레임별 1비트 삽입
@@ -588,6 +591,7 @@ class CausalEncoder(nn.Module):
         Args:
             audio: [B, 1, T] 원본 오디오
             message: [B, 128] 워터마크 비트
+            frame_offset: 스트리밍 시 현재 프레임 인덱스 (기본값 0 = batch mode)
 
         Returns:
             watermarked: [B, 1, T] 워터마크된 오디오
@@ -597,8 +601,8 @@ class CausalEncoder(nn.Module):
         # 1. Causal audio feature extraction
         audio_feat = self.audio_encoder(audio)  # [B, C, T]
 
-        # 2. Causal frame-wise fusion
-        fused = self.frame_fusion(audio_feat, message)
+        # 2. Causal frame-wise fusion (with frame_offset for streaming)
+        fused = self.frame_fusion(audio_feat, message, frame_offset=frame_offset)
 
         # 3. Post-fusion refinement
         fused = self.fusion_refine(fused)
@@ -865,6 +869,9 @@ class CausalStreamingEncoder:
     
     히스토리 버퍼 불필요!
     단일 프레임 직접 처리 가능.
+    
+    Note:
+        frame_offset을 encoder에 전달하여 올바른 cyclic bit를 삽입합니다.
     """
 
     def __init__(self, encoder: CausalEncoder):
@@ -892,9 +899,9 @@ class CausalStreamingEncoder:
             watermarked: [320] 워터마크된 오디오
         
         Note:
-            메시지 회전(cyclic bit alignment)은 Encoder 내부의
-            CausalFrameWiseFusionBlock에서 자동으로 처리됩니다.
-            따라서 여기서는 원본 메시지를 그대로 전달합니다.
+            frame_offset을 전달하여 올바른 cyclic bit index를 사용합니다.
+            예: frame 0 → message[0], frame 1 → message[1], ...
+                frame 128 → message[0] (cyclic)
         """
         device = next(self.encoder.parameters()).device
 
@@ -903,8 +910,8 @@ class CausalStreamingEncoder:
         if message.dim() == 1:
             message = message.unsqueeze(0).to(device)
 
-        # 직접 인코딩! (메시지 회전은 Encoder 내부에서 처리)
-        watermarked = self.encoder(frame, message)
+        # frame_offset을 전달하여 올바른 cyclic bit 사용
+        watermarked = self.encoder(frame, message, frame_offset=self._frame_index)
 
         self._frame_index += 1
         return watermarked.squeeze()
@@ -912,7 +919,6 @@ class CausalStreamingEncoder:
     @property
     def frame_index(self) -> int:
         return self._frame_index
-
 
 # =============================================================================
 # Utility Functions
