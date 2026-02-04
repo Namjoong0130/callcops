@@ -1,6 +1,6 @@
 {
   "expo": {
-    "name": "callcops-app",
+    "name": "Callcops",
     "slug": "callcops-app",
     "version": "1.0.0",
     "orientation": "portrait",
@@ -17,7 +17,7 @@
     ],
     "ios": {
       "supportsTablet": true,
-      "bundleIdentifier": "com.anonymous.callcopsapp",
+      "bundleIdentifier": "com.madcamp.callcops",
       "infoPlist": {
         "NSMicrophoneUsageDescription": "워터마크 삽입을 위해 마이크 접근 권한이 필요합니다."
       }
