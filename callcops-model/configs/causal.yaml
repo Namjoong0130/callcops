@@ -56,40 +56,56 @@ model:
 # 학습 설정
 training:
   batch_size: 24
-  learning_rate: 0.0001             # 1e-4 (초기 학습)
+  learning_rate: 0.0001             # 1e-4 (peak LR, warmup 후 도달)
+  warmup_start_lr: 0.000001         # 1e-6 (warmup 시작 LR)
   num_workers: 4
   adam_betas: [0.5, 0.9]
-  lr_scheduler: "cosine"
-  warmup_epochs: 5
+  lr_scheduler: "cosine"            # warmup → cosine decay
+  warmup_epochs: 5                  # 5 에포크 동안 1e-6 → 1e-4 선형 증가
   epochs: 100
-  grad_clip: 1.0
+  grad_clip: 0.5                    # 0.5 (gradient explosion 방지)
   use_amp: true                     # Mixed Precision (BF16)
-  
+
   # ═══════════════════════════════════════════════════
-  # 손실 함수 가중치 (Lambda Values)
+  # 손실 함수 가중치 (SNR-First Strategy)
   # ═══════════════════════════════════════════════════
-  # 전략: Audio-Priority (SNR 우선, BER은 BCH 허용 범위 내에서 관리)
+  # 전략: SNR-First (오디오 품질 먼저 안정화, BER은 BCH 허용 범위 내)
   #
-  # lambda_bit:   2.0   — 비트 임베딩 압박 완화
-  # lambda_audio: 50.0  — Mel Loss (지각적 품질)
-  # lambda_stft:  10.0  — 스펙트럼 보존
-  # lambda_l1:    10.0  — Waveform 직접 보존
+  # 문제: Epoch 1-11에서 SNR 8dB, BER 불안정 (0.01~0.20)
+  # 원인: lambda_bit이 너무 높아 오디오 품질 파괴
+  # 해결: 오디오 손실 극대화, 비트 압박 최소화
+  #
+  # lambda_bit:   0.1   — 비트 압박 최소화 (SNR 안정 후 점진적 복원)
+  # lambda_audio: 500.0 — Mel Loss 최우선 (지각적 품질)
+  # lambda_stft:  30.0  — 스펙트럼 보존 강화
+  # lambda_l1:    500.0 — Waveform 직접 보존 극대화 → SNR
   # lambda_adv:   0.05  — GAN 안정성
   # lambda_det:   0.1   — Detection 정확도
   # ═══════════════════════════════════════════════════
-  lambda_bit: 2.0                   # BCE loss for bit accuracy
-  lambda_audio: 50.0                # Mel Loss (perceptual quality)
-  lambda_stft: 10.0                 # Multi-resolution STFT loss
-  lambda_l1: 10.0                   # L1 waveform loss → SNR
+  lambda_bit: 0.1                   # BCE loss 최소화 (SNR 안정 후 DWC가 복원)
+  lambda_audio: 500.0               # Mel Loss (지각적 품질) 최우선
+  lambda_stft: 30.0                 # Multi-resolution STFT loss 강화
+  lambda_l1: 500.0                  # L1 waveform loss → SNR 직접 최적화
   lambda_adv: 0.05                  # Adversarial loss (GAN)
   lambda_det: 0.1                   # Detection accuracy
-  
+
   # SNR 목표
   target_snr_db: 25.0               # 최소 25dB SNR 목표
-  
+
   # Encoder Alpha (perturbation scale)
   encoder_alpha: 0.25               # 물리적 강도 제한
-  
+
+  # ═══════════════════════════════════════════════════
+  # Dynamic Weight Controller (SNR-First)
+  # ═══════════════════════════════════════════════════
+  # SNR < 15dB: lambda_bit → 0 (오디오 복구에만 집중)
+  # 15dB ≤ SNR < 20dB: lambda_bit 선형 복원 (0 → config 값)
+  # SNR ≥ 20dB: lambda_bit = config 값 (정상 학습)
+  dynamic_weight_controller:
+    enabled: true
+    snr_critical: 15.0              # 이 미만이면 lambda_bit = 0
+    snr_target: 20.0                # 이 이상이면 lambda_bit 완전 복원
+
   # Early stopping
   early_stopping:
     enabled: true

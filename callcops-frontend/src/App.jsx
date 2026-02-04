@@ -15,6 +15,7 @@ import { AudioUploader } from './components/AudioUploader';
 import { EmbedPanel } from './components/EmbedPanel';
 import { MessageComparison } from './components/MessageComparison';
 import { CRCVerificationPanel } from './components/CRCVerificationPanel';
+import { attemptCorrection } from './utils/crc';
 import { ProgressiveDetection } from './components/ProgressiveDetection';
 import PhoneSimulator from './pages/PhoneSimulator';
 
@@ -84,6 +85,13 @@ function MainApp() {
       setCurrentBitProbs(detectionState.accumulated);
     }
   }, [isDetecting, detectionState]);
+
+  // Compute CRC correction result for MessageComparison
+  const correctedBitIndex = useMemo(() => {
+    if (!currentBitProbs || currentBitProbs.length !== 128) return null;
+    const correction = attemptCorrection(currentBitProbs);
+    return correction.success ? correction.correctedBit : null;
+  }, [currentBitProbs]);
 
   // Start synchronized detection: pre-compute all frameProbs, then play
   const handleStartDetection = useCallback(async () => {
@@ -410,7 +418,33 @@ function MainApp() {
                 </button>
               </div>
 
-
+              {/* Model Precision Toggle */}
+              <div className="flex bg-surface/50 rounded-xl p-1">
+                <button
+                  onClick={() => inference.setModelPrecision('fp32')}
+                  disabled={inference.isLoading}
+                  className={`px-3 py-2 rounded-lg text-xs font-medium transition-all duration-200
+                    ${inference.modelPrecision === 'fp32'
+                      ? 'bg-emerald-500/80 text-white shadow-lg shadow-emerald-500/20'
+                      : 'text-gray-400 hover:text-gray-200 hover:bg-white/5'
+                    }`}
+                  title="Full precision (FP32) - Higher accuracy, larger model"
+                >
+                  FP32
+                </button>
+                <button
+                  onClick={() => inference.setModelPrecision('int8')}
+                  disabled={inference.isLoading}
+                  className={`px-3 py-2 rounded-lg text-xs font-medium transition-all duration-200
+                    ${inference.modelPrecision === 'int8'
+                      ? 'bg-amber-500/80 text-white shadow-lg shadow-amber-500/20'
+                      : 'text-gray-400 hover:text-gray-200 hover:bg-white/5'
+                    }`}
+                  title="Quantized (INT8) - Smaller model, faster loading"
+                >
+                  INT8
+                </button>
+              </div>
             </div>
           </div>
         </header>
@@ -691,6 +725,7 @@ function MainApp() {
                 <MessageComparison
                   originalMessage={originalMessage}
                   decodedProbs={currentBitProbs}
+                  correctedBitIndex={correctedBitIndex}
                 />
                 <CRCVerificationPanel
                   decodedMessage={currentBitProbs}
@@ -718,7 +753,7 @@ function MainApp() {
         <footer className="text-center text-xs text-gray-500 py-4">
           <p>CallCops Preview • On-device ONNX Inference • 8kHz Audio Watermarking</p>
           <p className="mt-1">
-            Model: {appMode === 'embed' ? inference.encoderModelName : inference.decoderModelName} •
+            Model: {appMode === 'embed' ? inference.encoderModelName : inference.decoderModelName} ({inference.modelPrecision.toUpperCase()}) •
             Sample Rate: 8kHz • Payload: 128 bits
           </p>
         </footer>
