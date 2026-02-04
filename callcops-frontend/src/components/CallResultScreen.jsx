@@ -8,20 +8,20 @@ export default function CallResultScreen({ isValid, crcValid, payload, onEndCall
     // Parse payload bits into meaningful sections (if available)
     const parsePayload = () => {
         if (!payload || payload.length < 128) {
-            return { sync: '—', timestamp: '—', authCode: '—', crc: '—' };
+            return { sync: '—', timestamp: '—', authCode: '—', rs: '—' };
         }
 
-        // Extract bit sections
+        // Extract bit sections (RS structure: 96 data + 32 parity)
         const syncBits = payload.slice(0, 16);
         const timestampBits = payload.slice(16, 48);
-        const authBits = payload.slice(48, 112);
-        const crcBits = payload.slice(112, 128);
+        const authBits = payload.slice(48, 96);  // 48 bits (was 64)
+        const rsBits = payload.slice(96, 128);   // 32 bits RS parity (was 16 CRC)
 
         // Convert to values
         const syncValue = bitsToHex(syncBits);
         const timestampValue = bitsToInt(timestampBits);
-        const authValue = bitsToHex(authBits.slice(0, 32)) + '...'; // Partial display
-        const crcValue = bitsToHex(crcBits);
+        const authValue = bitsToHex(authBits.slice(0, 24)) + '...'; // Partial display
+        const rsValue = bitsToHex(rsBits);
 
         // Format timestamp (assuming Unix timestamp in seconds)
         const date = new Date(timestampValue * 1000);
@@ -31,7 +31,7 @@ export default function CallResultScreen({ isValid, crcValid, payload, onEndCall
             sync: syncValue,
             timestamp: formattedTime,
             authCode: authValue,
-            crc: crcValue
+            rs: rsValue
         };
     };
 
@@ -97,9 +97,9 @@ export default function CallResultScreen({ isValid, crcValid, payload, onEndCall
                         </div>
 
                         <div className="flex justify-between items-center">
-                            <span className="text-gray-500">CRC Check</span>
+                            <span className="text-gray-500">RS Check</span>
                             <span className={`font-mono text-sm ${crcValid ? 'text-green-400' : 'text-yellow-400'}`}>
-                                {crcValid ? '✓ Valid' : '⚠ Mismatch'}
+                                {crcValid ? '✓ Valid' : '⚠ Error Detected'}
                             </span>
                         </div>
                     </div>

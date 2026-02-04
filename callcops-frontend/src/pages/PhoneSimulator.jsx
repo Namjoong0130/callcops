@@ -4,7 +4,7 @@ import CallResultScreen from '../components/CallResultScreen';
 import LiveAnalysisScreen from '../components/LiveAnalysisScreen';
 import { useInference } from '../hooks/useInference';
 import { useAudioCapture } from '../hooks/useAudioCapture';
-import { calculateCRC16 } from '../utils/crc';
+import { verifyRS } from '../utils/reedSolomon';
 
 /**
  * PhoneSimulator - Main page simulating a phone call experience
@@ -120,23 +120,13 @@ export default function PhoneSimulator() {
                     const avgConf = probs.reduce((sum, p) => sum + Math.abs(p - 0.5), 0) / 128;
                     setConfidence(avgConf);
 
-                    // Calculate CRC in real-time
-                    const bits = probs.map(p => p > 0.5 ? 1 : 0);
-                    const dataBits = bits.slice(0, 112);
-                    const crcBits = bits.slice(112, 128);
-
-                    let actualCRC = 0;
-                    for (let j = 0; j < 16; j++) {
-                        if (crcBits[j]) actualCRC |= (1 << (15 - j));
-                    }
-
-                    const expectedCRC = calculateCRC16(dataBits);
-                    const crcMatch = expectedCRC === actualCRC;
-                    setCrcValid(crcMatch);
+                    // Verify with Reed-Solomon in real-time
+                    const rsResult = verifyRS(probs);
+                    setCrcValid(rsResult.isValid);  // Re-using crcValid state for RS validity
 
                     // Update validity status
                     const hasWatermark = avgConf > 0.1;
-                    setIsValid(hasWatermark && crcMatch);
+                    setIsValid(hasWatermark && rsResult.isValid);
                 }
 
                 // Small delay for visual effect

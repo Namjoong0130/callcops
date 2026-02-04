@@ -14,8 +14,8 @@ import { MetricsPanel } from './components/MetricsPanel';
 import { AudioUploader } from './components/AudioUploader';
 import { EmbedPanel } from './components/EmbedPanel';
 import { MessageComparison } from './components/MessageComparison';
-import { CRCVerificationPanel } from './components/CRCVerificationPanel';
-import { attemptCorrection } from './utils/crc';
+import { RSVerificationPanel } from './components/RSVerificationPanel';
+import { verifyRS } from './utils/reedSolomon';
 import { ProgressiveDetection } from './components/ProgressiveDetection';
 import PhoneSimulator from './pages/PhoneSimulator';
 
@@ -86,12 +86,13 @@ function MainApp() {
     }
   }, [isDetecting, detectionState]);
 
-  // Compute CRC correction result for MessageComparison
-  const correctedBitIndex = useMemo(() => {
+  // Compute RS correction result for MessageComparison
+  const rsResult = useMemo(() => {
     if (!currentBitProbs || currentBitProbs.length !== 128) return null;
-    const correction = attemptCorrection(currentBitProbs);
-    return correction.success ? correction.correctedBit : null;
+    return verifyRS(currentBitProbs);
   }, [currentBitProbs]);
+  
+  const correctedBitIndex = rsResult?.errorsCorrected > 0 ? rsResult.corrected : null;
 
   // Start synchronized detection: pre-compute all frameProbs, then play
   const handleStartDetection = useCallback(async () => {
@@ -727,21 +728,21 @@ function MainApp() {
                   decodedProbs={currentBitProbs}
                   correctedBitIndex={correctedBitIndex}
                 />
-                <CRCVerificationPanel
+                <RSVerificationPanel
                   decodedMessage={currentBitProbs}
                   originalMessage={originalMessage}
                 />
               </section>
             )}
 
-            {/* CRC Verification - Shows even without original message */}
+            {/* RS Verification - Shows even without original message */}
             {!originalMessage && currentBitProbs && (
               <section className="glass rounded-2xl p-6">
                 <h2 className="text-lg font-semibold text-gray-200 mb-4 flex items-center gap-2">
-                  <span className="text-lg">🔒</span>
-                  Payload Verification
+                  <span className="text-lg">🛡️</span>
+                  RS Payload Verification
                 </h2>
-                <CRCVerificationPanel
+                <RSVerificationPanel
                   decodedMessage={currentBitProbs}
                 />
               </section>

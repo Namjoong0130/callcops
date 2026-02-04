@@ -7,11 +7,11 @@
 
 import { useMemo } from 'react';
 
-// 128-bit message structure
+// 128-bit message structure (RS)
 const SYNC_BITS = 16;
 const TIMESTAMP_BITS = 32;
-const AUTH_BITS = 64;
-const CRC_BITS = 16;
+const AUTH_BITS = 48;  // Reduced from 64 for RS parity
+const RS_BITS = 32;    // Reed-Solomon parity (was CRC 16)
 
 export function MessageComparison({
   originalMessage,  // Float32Array[128] - embedded message (0 or 1)
@@ -29,7 +29,7 @@ export function MessageComparison({
     let syncMatches = 0;
     let timestampMatches = 0;
     let authMatches = 0;
-    let crcMatches = 0;
+    let rsMatches = 0;
 
     const comparison = [];
 
@@ -53,7 +53,7 @@ export function MessageComparison({
         if (i < SYNC_BITS) syncMatches++;
         else if (i < SYNC_BITS + TIMESTAMP_BITS) timestampMatches++;
         else if (i < SYNC_BITS + TIMESTAMP_BITS + AUTH_BITS) authMatches++;
-        else crcMatches++;
+        else rsMatches++;
       }
     }
 
@@ -62,7 +62,7 @@ export function MessageComparison({
       syncAccuracy: (syncMatches / SYNC_BITS * 100).toFixed(1),
       timestampAccuracy: (timestampMatches / TIMESTAMP_BITS * 100).toFixed(1),
       authAccuracy: (authMatches / AUTH_BITS * 100).toFixed(1),
-      crcAccuracy: (crcMatches / CRC_BITS * 100).toFixed(1),
+      rsAccuracy: (rsMatches / RS_BITS * 100).toFixed(1),
       matches,
       comparison
     };
@@ -146,14 +146,14 @@ export function MessageComparison({
         </div>
 
         <div className="bg-surface/50 rounded-lg p-2">
-          <p className="text-[10px] text-gray-500 mb-1">CRC</p>
-          <p className={`text-lg font-bold ${getAccuracyColor(metrics.crcAccuracy)}`}>
-            {metrics.crcAccuracy}%
+          <p className="text-[10px] text-gray-500 mb-1">RS Parity</p>
+          <p className={`text-lg font-bold ${getAccuracyColor(metrics.rsAccuracy)}`}>
+            {metrics.rsAccuracy}%
           </p>
           <div className="h-1 bg-gray-700 rounded-full mt-1 overflow-hidden">
             <div
-              className={`h-full ${getAccuracyBg(metrics.crcAccuracy)} transition-all`}
-              style={{ width: `${metrics.crcAccuracy}%` }}
+              className={`h-full ${getAccuracyBg(metrics.rsAccuracy)} transition-all`}
+              style={{ width: `${metrics.rsAccuracy}%` }}
             />
           </div>
         </div>
@@ -163,7 +163,7 @@ export function MessageComparison({
       {showDetails && (
         <div>
           <p className="text-xs text-gray-400 mb-2">
-            비트별 비교 (녹색: 일치, 빨강: 불일치{correctedBitIndex !== null ? ', 노랑: CRC 정정' : ''})
+            비트별 비교 (녹색: 일치, 빨강: 불일치{correctedBitIndex !== null ? ', 노랑: RS 정정' : ''})
           </p>
           <div className="grid grid-cols-16 gap-0.5">
             {metrics.comparison.map((bit, i) => {
@@ -186,7 +186,7 @@ export function MessageComparison({
                     ${!isCorrected && i >= SYNC_BITS + TIMESTAMP_BITS + AUTH_BITS ? 'ring-1 ring-purple-500/30' : ''}
                   `}
                   title={isCorrected
-                    ? `Bit ${i}: CRC 오류 정정됨 (${bit.decoded} → ${correctedValue})`
+                    ? `Bit ${i}: RS 오류 정정됨 (${bit.decoded} → ${correctedValue})`
                     : `Bit ${i}: Original=${bit.original}, Decoded=${bit.decoded} (${(bit.prob * 100).toFixed(0)}%)`
                   }
                 >
@@ -226,7 +226,7 @@ export function MessageComparison({
               <span className="w-2 h-2 rounded-sm bg-green-500/50" /> Auth
             </span>
             <span className="flex items-center gap-1">
-              <span className="w-2 h-2 rounded-sm bg-purple-500/50" /> CRC
+              <span className="w-2 h-2 rounded-sm bg-purple-500/50" /> RS Parity
             </span>
           </div>
         </div>

@@ -2,7 +2,7 @@ import React from 'react';
 
 /**
  * LiveAnalysisScreen - Shows real-time detection progress
- * Displays bit probabilities, CRC status, and validation state as they update
+ * Displays bit probabilities, RS status, and validation state as they update
  */
 export default function LiveAnalysisScreen({
     progress,
@@ -117,8 +117,8 @@ export default function LiveAnalysisScreen({
                     isGood={confidence > 0.3}
                 />
                 <StatusBadge
-                    label="CRC-16 Check"
-                    value={crcValid === null ? null : (crcValid ? '✓ Valid' : '✗ Mismatch')}
+                    label="RS(16,12) Check"
+                    value={crcValid === null ? null : (crcValid ? '✓ Valid' : '✗ Error Detected')}
                     isGood={crcValid}
                 />
                 <StatusBadge
