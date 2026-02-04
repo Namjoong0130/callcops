@@ -665,9 +665,24 @@ export default function ReceiverMode({ onBack }) {
     const toggleSpeaker = async () => {
         const nextState = !isSpeakerOn;
         setIsSpeakerOn(nextState);
-        if (soundRef.current) {
-            // Speaker on -> 1.0 (Full), Speaker off -> 0.2 (Earpiece imitation)
-            await soundRef.current.setVolumeAsync(nextState ? 1.0 : 0.2);
+
+        try {
+            // Configure audio session to route through speaker or earpiece
+            await Audio.setAudioModeAsync({
+                allowsRecordingIOS: false,
+                playsInSilentModeIOS: true,
+                staysActiveInBackground: true,
+                // Key: Use 'default' for speaker, 'voice' routes to earpiece
+                // playThroughEarpieceAndroid controls Android routing
+                playThroughEarpieceAndroid: !nextState,
+            });
+
+            if (soundRef.current) {
+                // Speaker on -> Maximum volume, Speaker off -> Low volume
+                await soundRef.current.setVolumeAsync(nextState ? 1.0 : 0.15);
+            }
+        } catch (e) {
+            console.warn('Speaker toggle error:', e);
         }
     };
 

@@ -45,6 +45,7 @@ export default function SenderMode({ onBack }) {
   const [outputWaveform, setOutputWaveform] = useState(new Array(30).fill(0));
   const [currentBitIndex, setCurrentBitIndex] = useState(0);
   const [animationTick, setAnimationTick] = useState(0); // For continuous animation
+  const [dotCount, setDotCount] = useState(1); // For '인코딩 처리중.' animation
 
   const inference = useInference();
   const timerRef = useRef(null);
@@ -59,6 +60,8 @@ export default function SenderMode({ onBack }) {
   const messageBitsRef = useRef(null);        // 128-bit message as Float32Array
   const frameCountRef = useRef(0);            // For visualization throttling
   const useOnnxRef = useRef(false);           // Track ONNX availability
+  const processQueueRef = useRef(null);       // Expose processEncodingQueue for flushing
+  const isProcessingRef = useRef(false);      // Global processing flag
 
   // Configure audio session on mount
   // CRITICAL: Configure for RAW audio capture without voice processing
@@ -104,6 +107,16 @@ export default function SenderMode({ onBack }) {
       LiveAudioStream.stop();
     };
   }, []);
+
+  // Dot animation for encoding state
+  useEffect(() => {
+    if (state === 'encoding') {
+      const dotTimer = setInterval(() => {
+        setDotCount(prev => (prev % 3) + 1); // Cycle 1 -> 2 -> 3 -> 1
+      }, 500);
+      return () => clearInterval(dotTimer);
+    }
+  }, [state]);
 
   const formatTime = (seconds) => {
     const mins = Math.floor(seconds / 60);
@@ -279,11 +292,10 @@ export default function SenderMode({ onBack }) {
       // Non-blocking audio collection callback
       // Key insight: Don't await ONNX inside the audio callback!
       // Just collect samples quickly, process encoding separately
-      let isProcessing = false;
 
       const processEncodingQueue = async () => {
-        if (isProcessing) return;
-        isProcessing = true;
+        if (isProcessingRef.current) return;
+        isProcessingRef.current = true;
 
         try {
           // Process all available frames
@@ -333,9 +345,12 @@ export default function SenderMode({ onBack }) {
             }
           }
         } finally {
-          isProcessing = false;
+          isProcessingRef.current = false;
         }
       };
+
+      // Expose for flushing in handleStopRecording
+      processQueueRef.current = processEncodingQueue;
 
       // Audio data callback - just collect, don't block!
       LiveAudioStream.on('data', (base64Data) => {
@@ -386,6 +401,34 @@ export default function SenderMode({ onBack }) {
     try {
       console.log('Stopping real-time recording...');
       LiveAudioStream.stop();
+
+      // Flush remaining input buffer by processing everything left
+      // NO TIMEOUT - wait for ALL samples to be processed
+      setStatusText('Flushing remaining samples...');
+      setState('encoding'); // Show encoding UI immediately
+
+      if (processQueueRef.current) {
+        // Wait for any in-flight processing to finish
+        while (isProcessingRef.current) {
+          await new Promise(r => setTimeout(r, 50));
+        }
+
+        // Keep processing until input buffer is empty
+        let flushCount = 0;
+        while (inputBufferRef.current.length >= FRAME_SAMPLES) {
+          isProcessingRef.current = false; // Reset flag to allow processing
+          await processQueueRef.current();
+          flushCount++;
+
+          // Update progress UI every 10 flush cycles
+          if (flushCount % 10 === 0) {
+            const remaining = Math.floor(inputBufferRef.current.length / FRAME_SAMPLES);
+            setStatusText(`Flushing... ${remaining} frames remaining`);
+          }
+        }
+
+        console.log(`Flush complete after ${flushCount} cycles`);
+      }
 
       setState('encoding');
       setStatusText('Saving encoded audio...');
@@ -629,6 +672,9 @@ export default function SenderMode({ onBack }) {
 
   // ENCODING STATE
   if (state === 'encoding') {
+    // Animated dots: ., .., ...
+    const dots = '.'.repeat(dotCount);
+
     return (
       <View style={styles.container}>
         <LinearGradient
@@ -639,14 +685,9 @@ export default function SenderMode({ onBack }) {
         />
 
 
-        <View style={styles.centerContent}>
-          <Text style={styles.title}>Encoding Watermark</Text>
-          <Text style={styles.subtitle}>{statusText || 'Processing...'}</Text>
-
-          <View style={styles.progressContainer}>
-            <View style={[styles.progressBar, { width: `${progress}%` }]} />
-          </View>
-          <Text style={styles.progressText}>{progress}%</Text>
+        <View style={[styles.centerContent, { marginTop: 200 }]}>
+          <Text style={styles.title}>인코딩 처리중{dots}</Text>
+          <Text style={styles.subtitle}>잠시만 기다려주세요</Text>
 
           {renderBitMatrix()}
         </View>
