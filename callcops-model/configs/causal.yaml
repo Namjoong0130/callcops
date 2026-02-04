@@ -67,44 +67,46 @@ training:
   use_amp: true                     # Mixed Precision (BF16)
 
   # ═══════════════════════════════════════════════════
-  # 손실 함수 가중치 (SNR-First Strategy)
+  # 손실 함수 가중치 (Balanced Strategy for Causal)
   # ═══════════════════════════════════════════════════
-  # 전략: SNR-First (오디오 품질 먼저 안정화, BER은 BCH 허용 범위 내)
+  # 전략: Causal 모델은 receptive field가 제한적이므로
+  #        비트 삽입 학습에 충분한 gradient가 필요함.
+  #        기존 SNR-First(lambda_bit=0.1)는 비트 학습 불가.
   #
-  # 문제: Epoch 1-11에서 SNR 8dB, BER 불안정 (0.01~0.20)
-  # 원인: lambda_bit이 너무 높아 오디오 품질 파괴
-  # 해결: 오디오 손실 극대화, 비트 압박 최소화
-  #
-  # lambda_bit:   0.1   — 비트 압박 최소화 (SNR 안정 후 점진적 복원)
-  # lambda_audio: 500.0 — Mel Loss 최우선 (지각적 품질)
-  # lambda_stft:  30.0  — 스펙트럼 보존 강화
-  # lambda_l1:    500.0 — Waveform 직접 보존 극대화 → SNR
-  # lambda_adv:   0.05  — GAN 안정성
-  # lambda_det:   0.1   — Detection 정확도
+  # lambda_bit:   2.0   — 비트 정확도 확보 (기존 0.1 → 20배 상향)
+  # lambda_audio: 50.0  — Mel Loss (지각적 품질, 과도한 500→50 완화)
+  # lambda_stft:  10.0  — 스펙트럼 보존 (적정 수준)
+  # lambda_l1:    30.0  — Waveform SNR (과도한 500→30 완화)
+  # lambda_adv:   0.1   — GAN 안정성
+  # lambda_det:   0.5   — Detection 정확도 (causal 특성 보상)
   # ═══════════════════════════════════════════════════
-  lambda_bit: 0.1                   # BCE loss 최소화 (SNR 안정 후 DWC가 복원)
-  lambda_audio: 500.0               # Mel Loss (지각적 품질) 최우선
-  lambda_stft: 30.0                 # Multi-resolution STFT loss 강화
-  lambda_l1: 500.0                  # L1 waveform loss → SNR 직접 최적화
-  lambda_adv: 0.05                  # Adversarial loss (GAN)
-  lambda_det: 0.1                   # Detection accuracy
+  lambda_bit: 2.0                   # BCE loss — 비트 학습의 핵심
+  lambda_audio: 50.0                # Mel Loss (지각적 품질)
+  lambda_stft: 10.0                 # Multi-resolution STFT loss
+  lambda_l1: 30.0                   # L1 waveform loss → SNR
+  lambda_adv: 0.1                   # Adversarial loss (GAN)
+  lambda_det: 0.5                   # Detection accuracy
 
   # SNR 목표
   target_snr_db: 25.0               # 최소 25dB SNR 목표
 
   # Encoder Alpha (perturbation scale)
-  encoder_alpha: 0.25               # 물리적 강도 제한
+  # Causal 모델은 past-only context로 정보량이 제한적이므로
+  # non-causal(0.25) 대비 더 강한 섭동이 필요
+  encoder_alpha: 0.35               # 물리적 강도 (causal 보상)
 
   # ═══════════════════════════════════════════════════
-  # Dynamic Weight Controller (SNR-First)
+  # Dynamic Weight Controller (Balanced)
   # ═══════════════════════════════════════════════════
-  # SNR < 15dB: lambda_bit → 0 (오디오 복구에만 집중)
-  # 15dB ≤ SNR < 20dB: lambda_bit 선형 복원 (0 → config 값)
-  # SNR ≥ 20dB: lambda_bit = config 값 (정상 학습)
+  # SNR이 극도로 낮을 때만 비트 학습을 억제.
+  # 기존 15/20dB 기준은 너무 보수적 — 비트 학습 기회를 과도하게 차단함.
+  # SNR < 10dB: lambda_bit → 0 (심각한 품질 저하 시에만)
+  # 10dB ≤ SNR < 15dB: lambda_bit 선형 복원
+  # SNR ≥ 15dB: lambda_bit = config 값 (정상 학습)
   dynamic_weight_controller:
     enabled: true
-    snr_critical: 15.0              # 이 미만이면 lambda_bit = 0
-    snr_target: 20.0                # 이 이상이면 lambda_bit 완전 복원
+    snr_critical: 10.0              # 이 미만이면 lambda_bit = 0
+    snr_target: 15.0                # 이 이상이면 lambda_bit 완전 복원
 
   # Early stopping
   early_stopping:

@@ -575,9 +575,11 @@ class CausalEncoder(nn.Module):
         self.output_conv = nn.Conv1d(hidden_channels[0], 1, kernel_size=7, padding=0)
 
         # Alpha (perturbation scale)
-        self.alpha_min = 0.25
+        # Causal 모델은 past-only context로 비트 삽입이 어려우므로
+        # non-causal(0.25) 대비 더 강한 섭동 허용
+        self.alpha_min = 0.35
         self.alpha_max = 1.0
-        self.register_buffer('alpha', torch.tensor(0.25))
+        self.register_buffer('alpha', torch.tensor(0.35))
 
     def forward(
         self,

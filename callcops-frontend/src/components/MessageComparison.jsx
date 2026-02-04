@@ -16,6 +16,7 @@ const CRC_BITS = 16;
 export function MessageComparison({
   originalMessage,  // Float32Array[128] - embedded message (0 or 1)
   decodedProbs,     // Float32Array[128] - decoded probabilities (0~1)
+  correctedBitIndex = null, // number|null - index of CRC-corrected bit
   showDetails = true
 }) {
   // Calculate metrics
@@ -161,30 +162,60 @@ export function MessageComparison({
       {/* Bit-by-bit comparison grid */}
       {showDetails && (
         <div>
-          <p className="text-xs text-gray-400 mb-2">비트별 비교 (녹색: 일치, 빨강: 불일치)</p>
+          <p className="text-xs text-gray-400 mb-2">
+            비트별 비교 (녹색: 일치, 빨강: 불일치{correctedBitIndex !== null ? ', 노랑: CRC 정정' : ''})
+          </p>
           <div className="grid grid-cols-16 gap-0.5">
-            {metrics.comparison.map((bit, i) => (
-              <div
-                key={i}
-                className={`w-full aspect-square rounded-sm flex items-center justify-center text-[8px] font-mono
-                  ${bit.isMatch
-                    ? 'bg-green-500/30 text-green-300'
-                    : 'bg-red-500/50 text-red-200'
+            {metrics.comparison.map((bit, i) => {
+              const isCorrected = correctedBitIndex === i;
+              const correctedValue = isCorrected ? (bit.decoded === 1 ? 0 : 1) : null;
+
+              return (
+                <div
+                  key={i}
+                  className={`w-full aspect-square rounded-sm flex items-center justify-center text-[8px] font-mono relative
+                    ${isCorrected
+                      ? 'bg-amber-500/40 text-amber-100 ring-2 ring-amber-400/60'
+                      : bit.isMatch
+                        ? 'bg-green-500/30 text-green-300'
+                        : 'bg-red-500/50 text-red-200'
+                    }
+                    ${!isCorrected && i < SYNC_BITS ? 'ring-1 ring-cyan-500/30' : ''}
+                    ${!isCorrected && i >= SYNC_BITS && i < SYNC_BITS + TIMESTAMP_BITS ? 'ring-1 ring-yellow-500/30' : ''}
+                    ${!isCorrected && i >= SYNC_BITS + TIMESTAMP_BITS && i < SYNC_BITS + TIMESTAMP_BITS + AUTH_BITS ? 'ring-1 ring-green-500/30' : ''}
+                    ${!isCorrected && i >= SYNC_BITS + TIMESTAMP_BITS + AUTH_BITS ? 'ring-1 ring-purple-500/30' : ''}
+                  `}
+                  title={isCorrected
+                    ? `Bit ${i}: CRC 오류 정정됨 (${bit.decoded} → ${correctedValue})`
+                    : `Bit ${i}: Original=${bit.original}, Decoded=${bit.decoded} (${(bit.prob * 100).toFixed(0)}%)`
                   }
-                  ${i < SYNC_BITS ? 'ring-1 ring-cyan-500/30' : ''}
-                  ${i >= SYNC_BITS && i < SYNC_BITS + TIMESTAMP_BITS ? 'ring-1 ring-yellow-500/30' : ''}
-                  ${i >= SYNC_BITS + TIMESTAMP_BITS && i < SYNC_BITS + TIMESTAMP_BITS + AUTH_BITS ? 'ring-1 ring-green-500/30' : ''}
-                  ${i >= SYNC_BITS + TIMESTAMP_BITS + AUTH_BITS ? 'ring-1 ring-purple-500/30' : ''}
-                `}
-                title={`Bit ${i}: Original=${bit.original}, Decoded=${bit.decoded} (${(bit.prob * 100).toFixed(0)}%)`}
-              >
-                {bit.decoded}
-              </div>
-            ))}
+                >
+                  {isCorrected ? correctedValue : bit.decoded}
+                  {isCorrected && (
+                    <span className="absolute -top-0.5 -right-0.5 text-[6px] text-amber-300 leading-none">
+                      ✓
+                    </span>
+                  )}
+                </div>
+              );
+            })}
           </div>
 
           {/* Legend */}
           <div className="flex justify-center gap-4 mt-2 text-[10px] text-gray-500">
+            <span className="flex items-center gap-1">
+              <span className="w-2 h-2 rounded-sm bg-green-500/30" /> Match
+            </span>
+            <span className="flex items-center gap-1">
+              <span className="w-2 h-2 rounded-sm bg-red-500/50" /> Mismatch
+            </span>
+            {correctedBitIndex !== null && (
+              <span className="flex items-center gap-1">
+                <span className="w-2 h-2 rounded-sm bg-amber-500/40 ring-1 ring-amber-400/60" /> Corrected
+              </span>
+            )}
+          </div>
+          <div className="flex justify-center gap-4 mt-1 text-[10px] text-gray-500">
             <span className="flex items-center gap-1">
               <span className="w-2 h-2 rounded-sm bg-cyan-500/50" /> Sync
             </span>

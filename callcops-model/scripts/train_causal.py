@@ -463,6 +463,14 @@ def train_causal(
         print(f"  Discriminator: {params['discriminator']:,}")
         print(f"  Total: {params['total']:,}")
 
+        # Config-driven Alpha Override
+        encoder_alpha = training_config.get('encoder_alpha', None)
+        if encoder_alpha is not None:
+            old_alpha = model.encoder.alpha.item()
+            model.encoder.alpha.fill_(encoder_alpha)
+            model.encoder.alpha_min = encoder_alpha
+            print(f"  Encoder Alpha Override: {old_alpha:.3f} -> {encoder_alpha:.3f}")
+
         # ========================================
         # 2. Loss Function
         # ========================================
@@ -523,9 +531,14 @@ def train_causal(
 
         if resume_path and resume_path.exists():
             trainer.load_checkpoint(resume_path, new_lr=warmup_start_lr)
+            # 체크포인트 로드 후 Alpha 재강제 (체크포인트가 이전 alpha를 복원할 수 있음)
+            if encoder_alpha is not None:
+                model.encoder.alpha.fill_(encoder_alpha)
+                model.encoder.alpha_min = encoder_alpha
+                print(f"  Post-Checkpoint Alpha Re-enforced: {encoder_alpha:.3f}")
 
         # ========================================
-        # 5. Dynamic Weight Controller (SNR-First)
+        # 5. Dynamic Weight Controller
         # ========================================
         dwc_config = training_config.get('dynamic_weight_controller', {})
         dwc_enabled = dwc_config.get('enabled', False)
