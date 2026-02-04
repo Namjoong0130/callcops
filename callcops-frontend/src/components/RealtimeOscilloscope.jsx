@@ -145,7 +145,7 @@ export function RealtimeOscilloscope({
 
     const dPT = 22, dPB = 26;
     const dpH = DIFF_H - dPT - dPB;
-    const DIFF_MAX = 6, DIFF_MIN = -6, DIFF_R = DIFF_MAX - DIFF_MIN;
+    const DIFF_MAX = 20, DIFF_MIN = -20, DIFF_R = DIFF_MAX - DIFF_MIN;
 
     const binX = (bin) => PL + ((bin - DC_SKIP_BINS) / DISPLAY_BINS) * pW;
     const dbY  = (db) => PT + pH * (1 - (Math.max(DB_MIN, Math.min(DB_MAX, db)) - DB_MIN) / DB_RANGE);
@@ -260,7 +260,7 @@ export function RealtimeOscilloscope({
       dCtx.setLineDash([]);
 
       // +/- grid
-      for (const d of [-4, -2, 2, 4]) {
+      for (const d of [-15, -10, -5, 5, 10, 15]) {
         const y = dffY(d);
         dCtx.strokeStyle = '#1a2540'; dCtx.lineWidth = 0.5;
         dCtx.beginPath(); dCtx.moveTo(PL, y); dCtx.lineTo(PL + pW, y); dCtx.stroke();

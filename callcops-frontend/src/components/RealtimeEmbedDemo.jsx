@@ -138,7 +138,12 @@ export function RealtimeEmbedDemo({ onEmbed, createStreamingEncoder, isModelRead
           latenciesRef.current.push(latency);
           if (latenciesRef.current.length > 50) latenciesRef.current.shift();
 
-          // Update OUTPUT visualization buffer only (input is updated in onaudioprocess)
+          // Update VISUALIZATION buffers (Sync Input & Output)
+          // Input: Update with the original 'frame' being processed
+          visInputRef.current.copyWithin(0, FRAME_SAMPLES);
+          visInputRef.current.set(frame, VIS_BUFFER_SIZE - FRAME_SAMPLES);
+
+          // Output: Update with the processed 'watermarkedFrame'
           visOutputRef.current.copyWithin(0, FRAME_SAMPLES);
           visOutputRef.current.set(watermarkedFrame, VIS_BUFFER_SIZE - FRAME_SAMPLES);
 
@@ -164,10 +169,11 @@ export function RealtimeEmbedDemo({ onEmbed, createStreamingEncoder, isModelRead
             avgLatency: avgLatency.toFixed(1)
           }));
 
-          // Throttled OUTPUT visualization state update (~12fps)
-          // Input is already updated in onaudioprocess callback
+          // Throttled VISUALIZATION state update (~12fps)
+          // Updates both input and output simultaneously for perfect sync
           const now = performance.now();
           if (now - lastVisTimeRef.current >= VIS_THROTTLE_MS) {
+            setInputBuffer(visInputRef.current.slice());
             setOutputBuffer(visOutputRef.current.slice());
             lastVisTimeRef.current = now;
           }
@@ -291,7 +297,7 @@ export function RealtimeEmbedDemo({ onEmbed, createStreamingEncoder, isModelRead
       processorRef.current = processor;
 
       // Synchronous callback: just push to queue, no async processing here
-      // INPUT VISUALIZATION IS UPDATED HERE (independent of inference)
+      // Visualization update moved to processLoop for sync
       processor.onaudioprocess = (e) => {
         if (!isStreamingRef.current) return;
 
@@ -315,25 +321,6 @@ export function RealtimeEmbedDemo({ onEmbed, createStreamingEncoder, isModelRead
 
         // Push to processing queue
         inputQueueRef.current.push(audioChunk);
-
-        // ═══ INPUT VISUALIZATION: Update immediately (decoupled from inference) ═══
-        // This ensures the input spectrum is always responsive, even if inference lags
-        const chunkLen = audioChunk.length;
-        if (chunkLen >= VIS_BUFFER_SIZE) {
-          // Chunk is larger than buffer: take last VIS_BUFFER_SIZE samples
-          visInputRef.current.set(audioChunk.slice(chunkLen - VIS_BUFFER_SIZE));
-        } else {
-          // Shift existing data left and append new chunk
-          visInputRef.current.copyWithin(0, chunkLen);
-          visInputRef.current.set(audioChunk, VIS_BUFFER_SIZE - chunkLen);
-        }
-
-        // Throttled React state update for input visualization (~15fps)
-        const now = performance.now();
-        if (now - lastInputVisTimeRef.current >= 66) {  // ~15fps
-          setInputBuffer(visInputRef.current.slice());
-          lastInputVisTimeRef.current = now;
-        }
       };
 
       source.connect(processor);
