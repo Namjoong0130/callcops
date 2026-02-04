@@ -544,10 +544,12 @@ def train_causal(
         dwc_enabled = dwc_config.get('enabled', False)
         dwc_snr_critical = dwc_config.get('snr_critical', 15.0)
         dwc_snr_target = dwc_config.get('snr_target', 20.0)
+        bit_warmup_epochs = dwc_config.get('bit_warmup_epochs', 10)  # 초기 N 에포크는 bit 학습 우선
         base_lambda_bit = training_config.get('lambda_bit', 0.1)
 
         if dwc_enabled:
-            print(f"  DWC: SNR < {dwc_snr_critical}dB → lambda_bit=0, "
+            print(f"  DWC: Bit Warmup={bit_warmup_epochs} epochs (무조건 lambda_bit 활성화)")
+            print(f"  DWC: 이후 SNR < {dwc_snr_critical}dB → lambda_bit=0, "
                   f"SNR >= {dwc_snr_target}dB → lambda_bit={base_lambda_bit}")
 
         # ========================================
@@ -576,19 +578,26 @@ def train_causal(
             # Dynamic Weight Controller: adjust lambda_bit based on SNR
             if dwc_enabled:
                 val_snr = val_metrics['snr']
-                if val_snr < dwc_snr_critical:
+                
+                # Bit Warmup: 초기 N 에포크는 무조건 lambda_bit 활성화 (bit 학습 우선)
+                if epoch < bit_warmup_epochs:
+                    effective_lambda_bit = base_lambda_bit
+                    print(f"  [DWC] Warmup {epoch+1}/{bit_warmup_epochs}: lambda_bit={effective_lambda_bit:.4f} (고정)")
+                elif val_snr < dwc_snr_critical:
                     # SNR critical: disable bit loss entirely
                     effective_lambda_bit = 0.0
+                    print(f"  [DWC] SNR={val_snr:.1f}dB < {dwc_snr_critical}dB → lambda_bit=0 (SNR 우선)")
                 elif val_snr < dwc_snr_target:
                     # Linear ramp: 0 → base_lambda_bit as SNR goes from critical → target
                     ratio = (val_snr - dwc_snr_critical) / (dwc_snr_target - dwc_snr_critical)
                     effective_lambda_bit = base_lambda_bit * ratio
+                    print(f"  [DWC] SNR={val_snr:.1f}dB → lambda_bit={effective_lambda_bit:.4f} (램프)")
                 else:
                     # SNR healthy: full bit loss
                     effective_lambda_bit = base_lambda_bit
+                    print(f"  [DWC] SNR={val_snr:.1f}dB >= {dwc_snr_target}dB → lambda_bit={effective_lambda_bit:.4f}")
 
                 loss_fn.lambda_bit = effective_lambda_bit
-                print(f"  [DWC] SNR={val_snr:.1f}dB → lambda_bit={effective_lambda_bit:.4f}")
 
             # Summary
             streaming_status = "PASS" if streaming_result['passed'] else f"FAIL (diff={streaming_result['max_diff']:.2e})"

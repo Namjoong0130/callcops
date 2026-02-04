@@ -107,6 +107,7 @@ training:
     enabled: true
     snr_critical: 10.0              # 이 미만이면 lambda_bit = 0
     snr_target: 15.0                # 이 이상이면 lambda_bit 완전 복원
+    bit_warmup_epochs: 10           # 초기 N 에포크는 무조건 lambda_bit 활성화
 
   # Early stopping
   early_stopping:

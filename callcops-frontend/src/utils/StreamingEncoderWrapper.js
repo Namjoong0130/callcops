@@ -17,6 +17,9 @@
  *    assignment (frame_index % 128) is correct across the full stream.
  * 3. Message rotation compensates for the model's internal 0-based
  *    frame_indices = torch.arange(num_frames).
+ *
+ * Performance: All intermediate buffers are pre-allocated in reset()
+ * to avoid GC pressure during real-time streaming.
  */
 
 import * as ort from 'onnxruntime-web';
@@ -38,11 +41,17 @@ export class StreamingEncoderWrapper {
 
   /**
    * Reset all internal state. Call before starting a new stream.
+   * Pre-allocates all buffers to avoid GC during streaming.
    */
   reset() {
     this._historyBuffer = new Float32Array(HISTORY_SAMPLES);  // Zeros = silence
     this._globalFrameIndex = 0;
     this._historyFilled = 0;  // How many history frames have been filled so far
+
+    // Pre-allocated buffers (reused every frame — no GC pressure)
+    this._inputAudio = new Float32Array(TOTAL_SAMPLES);
+    this._rotatedMessage = new Float32Array(PAYLOAD_LENGTH);
+    this._outputFrame = new Float32Array(FRAME_SAMPLES);
   }
 
   /**
@@ -50,19 +59,18 @@ export class StreamingEncoderWrapper {
    *
    * @param {Float32Array} chunk - Exactly FRAME_SAMPLES (320) raw audio samples
    * @param {Float32Array} message - 128-element message array (0/1 floats)
-   * @returns {Promise<Float32Array>} - Watermarked 320 samples
+   * @returns {Promise<Float32Array>} - Watermarked 320 samples (new array each call)
    */
   async processFrame(chunk, message) {
     if (chunk.length !== FRAME_SAMPLES) {
       throw new Error(`Expected ${FRAME_SAMPLES} samples, got ${chunk.length}`);
     }
 
-    // 1. Build input buffer: [history (1600) | new_frame (320)] = 1920 samples
-    const inputAudio = new Float32Array(TOTAL_SAMPLES);
-    inputAudio.set(this._historyBuffer, 0);
-    inputAudio.set(chunk, HISTORY_SAMPLES);
+    // 1. Build input buffer in-place: [history (1600) | new_frame (320)] = 1920 samples
+    this._inputAudio.set(this._historyBuffer, 0);
+    this._inputAudio.set(chunk, HISTORY_SAMPLES);
 
-    // 2. Compute message rotation.
+    // 2. Compute message rotation in-place.
     //
     //    The model internally assigns:
     //      frame_indices = torch.arange(num_frames)  → [0, 1, 2, 3, 4, 5]
@@ -78,27 +86,27 @@ export class StreamingEncoderWrapper {
     //    the correct global bit for each frame.
     const rotationOffset = ((this._globalFrameIndex - this._historyFilled) % PAYLOAD_LENGTH
                             + PAYLOAD_LENGTH) % PAYLOAD_LENGTH;
-    const rotatedMessage = new Float32Array(PAYLOAD_LENGTH);
     for (let i = 0; i < PAYLOAD_LENGTH; i++) {
-      rotatedMessage[i] = message[(i + rotationOffset) % PAYLOAD_LENGTH];
+      this._rotatedMessage[i] = message[(i + rotationOffset) % PAYLOAD_LENGTH];
     }
 
-    // 3. Run ONNX inference
-    const audioTensor = new ort.Tensor('float32', inputAudio, [1, 1, TOTAL_SAMPLES]);
-    const messageTensor = new ort.Tensor('float32', rotatedMessage, [1, PAYLOAD_LENGTH]);
+    // 3. Run ONNX inference (reuse pre-allocated buffers for tensor creation)
+    const audioTensor = new ort.Tensor('float32', this._inputAudio, [1, 1, TOTAL_SAMPLES]);
+    const messageTensor = new ort.Tensor('float32', this._rotatedMessage, [1, PAYLOAD_LENGTH]);
 
     const results = await this._session.run({
       audio: audioTensor,
       message: messageTensor,
     });
 
-    const watermarkedFull = new Float32Array(results.watermarked.data);
-
     // 4. Extract only the last FRAME_SAMPLES from output (the new frame)
-    const watermarkedFrame = watermarkedFull.slice(
-      TOTAL_SAMPLES - FRAME_SAMPLES,
-      TOTAL_SAMPLES
-    );
+    //    Copy directly from ONNX result data — no intermediate full-copy
+    const resultData = results.watermarked.data;
+    const outputStart = TOTAL_SAMPLES - FRAME_SAMPLES;
+    const watermarkedFrame = new Float32Array(FRAME_SAMPLES);
+    for (let i = 0; i < FRAME_SAMPLES; i++) {
+      watermarkedFrame[i] = resultData[outputStart + i];
+    }
 
     // 5. Update history: shift left by one frame, append new RAW audio.
     //    We store RAW audio in history (not watermarked) because the encoder
@@ -134,7 +142,7 @@ export class StreamingEncoderWrapper {
 
     for (let i = 0; i < numFrames; i++) {
       const frameStart = i * FRAME_SAMPLES;
-      const frame = audio.slice(frameStart, frameStart + FRAME_SAMPLES);
+      const frame = audio.subarray(frameStart, frameStart + FRAME_SAMPLES);
       const watermarkedFrame = await this.processFrame(frame, message);
       output.set(watermarkedFrame, frameStart);
     }
