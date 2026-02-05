@@ -72,6 +72,9 @@ export function RealtimeEmbedDemo({ onEmbed, createStreamingEncoder, isModelRead
   // Rolling visualization buffers
   const visInputRef = useRef(new Float32Array(VIS_BUFFER_SIZE));
   const visOutputRef = useRef(new Float32Array(VIS_BUFFER_SIZE));
+  
+  // Queue for synchronized original frames (to align with mini-batch output timing)
+  const visSyncQueueRef = useRef([]);
 
   // Streaming wrapper ref
   const streamingWrapperRef = useRef(null);
@@ -175,6 +178,9 @@ export function RealtimeEmbedDemo({ onEmbed, createStreamingEncoder, isModelRead
           }
           readOffset += FRAME_SAMPLES;
 
+          // Queue the original frame for synchronized visualization
+          visSyncQueueRef.current.push(frameBuf.slice());
+          
           const startTime = performance.now();
           const watermarkedFrame = await wrapper.processFrame(frameBuf, msg);
           const latency = performance.now() - startTime;
@@ -187,8 +193,19 @@ export function RealtimeEmbedDemo({ onEmbed, createStreamingEncoder, isModelRead
           latenciesRef.current.push(latency);
           if (latenciesRef.current.length > 50) latenciesRef.current.shift();
 
-          // Update output visualization buffer (input vis is updated in audio callback)
+          // Update BOTH visualization buffers ONLY when watermarked output is available
+          // This ensures Original and Watermarked show the SAME time segment
           if (watermarkedFrame) {
+            // Pop the corresponding original frame from sync queue
+            const syncedOriginal = visSyncQueueRef.current.shift();
+            
+            // Update input visualization (synchronized with output timing)
+            if (syncedOriginal) {
+              visInputRef.current.copyWithin(0, FRAME_SAMPLES);
+              visInputRef.current.set(syncedOriginal, VIS_BUFFER_SIZE - FRAME_SAMPLES);
+            }
+            
+            // Update output visualization
             visOutputRef.current.copyWithin(0, FRAME_SAMPLES);
             visOutputRef.current.set(watermarkedFrame, VIS_BUFFER_SIZE - FRAME_SAMPLES);
           }
@@ -290,6 +307,7 @@ export function RealtimeEmbedDemo({ onEmbed, createStreamingEncoder, isModelRead
     rawTotalSamplesRef.current = 0;
     visInputRef.current.fill(0);
     visOutputRef.current.fill(0);
+    visSyncQueueRef.current = [];  // Reset synchronized frame queue
     stopRequestedRef.current = false;
     setFinalizeProgress('');
 
@@ -385,15 +403,9 @@ export function RealtimeEmbedDemo({ onEmbed, createStreamingEncoder, isModelRead
         // Push to processing queue (best-effort real-time watermarking)
         inputQueueRef.current.push(audioChunk);
 
-        // Update oscilloscope input buffer directly (real-time, no ONNX dependency)
-        const visBuf = visInputRef.current;
-        const chunkLen = audioChunk.length;
-        if (chunkLen < VIS_BUFFER_SIZE) {
-          visBuf.copyWithin(0, chunkLen);
-          visBuf.set(audioChunk, VIS_BUFFER_SIZE - chunkLen);
-        } else {
-          visBuf.set(audioChunk.subarray(chunkLen - VIS_BUFFER_SIZE));
-        }
+        // NOTE: visInputRef is now updated in processLoop (synchronized with output timing)
+        // Previously updated here for real-time display, but this caused time mismatch
+        // with the mini-batch delayed watermarked output.
       };
 
       isStreamingRef.current = true;
