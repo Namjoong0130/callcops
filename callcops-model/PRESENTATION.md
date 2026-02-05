@@ -177,14 +177,63 @@ Frame 129 → message[1]
 ### 2.3 128비트 페이로드 구조
 
 ```
-[16-bit Sync Pattern][32-bit Timestamp][64-bit Auth Data][16-bit CRC]
-       동기화 패턴         타임스탬프       인증 데이터        오류 검출
+[16-bit Sync Pattern][32-bit Timestamp][48-bit Auth Data][32-bit RS Parity]
+       동기화 패턴         타임스탬프       인증 데이터      오류 정정 코드
 ```
 
 - **Sync Pattern** `1010101010101010`: 프레임 경계 동기화에 사용
-- **Timestamp**: 통화 시작 시각 (위변조 방지)
-- **Auth Data**: 발신자 인증 정보
-- **CRC-16**: 복원된 비트의 무결성 검증
+- **Timestamp**: 통화 시작 시각 (Unix timestamp 하위 32비트, 위변조 방지)
+- **Auth Data**: 발신자 인증 정보 (전화번호 해시 등)
+- **RS Parity**: Reed-Solomon RS(16,12) 오류 정정 코드
+
+#### 2.3.1 Reed-Solomon 오류 정정 코드
+
+기존의 CRC-16은 오류를 **검출**만 할 수 있었다. CallCops는 전화망 코덱(G.711, G.729, AMR-NB)에 의한 비트 오류를 **정정**하기 위해 Reed-Solomon RS(16,12) 코드를 채택했다.
+
+**RS(16,12) over GF(2⁸) 구조:**
+
+- **데이터**: 12 bytes (96 bits) = Sync(2B) + Timestamp(4B) + Auth(6B)
+- **패리티**: 4 bytes (32 bits)
+- **총 코드워드**: 16 bytes (128 bits)
+- **오류 정정 능력**: 최대 **2 bytes** 오류 정정, **4 bytes** 오류 검출
+
+$$
+t = \frac{n - k}{2} = \frac{16 - 12}{2} = 2 \text{ (bytes)}
+$$
+
+**수학적 배경 - Galois Field GF(2⁸):**
+
+RS 코드는 유한체(Galois Field) 상의 다항식 연산을 기반으로 한다. GF(2⁸)는 256개 원소를 가지며, 각 원소는 1 byte에 대응된다.
+
+- **원시 다항식 (Primitive Polynomial)**: $p(x) = x^8 + x^4 + x^3 + x^2 + 1$ (0x11D)
+- **생성자 (Generator)**: $\alpha = 2$ (원시 원소)
+- **생성 다항식**: $g(x) = \prod_{i=0}^{3}(x - \alpha^i) = x^4 + \alpha^{75}x^3 + \alpha^{249}x^2 + \alpha^{78}x + \alpha^{6}$
+
+인코딩 과정:
+
+$$
+\text{Codeword}(x) = \text{Data}(x) \cdot x^{n-k} + \left(\text{Data}(x) \cdot x^{n-k} \mod g(x)\right)
+$$
+
+디코딩 과정 (Berlekamp-Massey 알고리즘):
+
+1. **신드롬 계산**: $S_i = r(\alpha^i)$ for $i = 0, 1, 2, 3$
+2. **오류 위치 다항식** $\Lambda(x)$ 계산
+3. **오류 위치 탐색** (Chien Search)
+4. **오류 크기 계산** (Forney Algorithm)
+5. **오류 정정**: $\text{corrected} = \text{received} \oplus \text{error}$
+
+**CRC-16 vs RS(16,12) 비교:**
+
+| 특성 | CRC-16 | RS(16,12) |
+|------|--------|-----------|
+| 오버헤드 | 16 bits | 32 bits |
+| 오류 검출 | 최대 16-bit burst | 최대 4 bytes |
+| 오류 정정 | ❌ 불가능 | ✅ 최대 2 bytes |
+| 연산 복잡도 | $O(n)$ | $O(n^2)$ |
+| 용도 | 단순 무결성 검증 | 채널 코딩 |
+
+전화망 환경에서 BER이 5~10%인 경우, 128비트 중 6~12비트가 오류일 수 있다. RS(16,12)는 최대 16비트(2바이트) 오류까지 완벽하게 정정하므로, 실용적인 음성 통화 환경에서 높은 신뢰성을 제공한다.
 
 ---
 
@@ -765,16 +814,57 @@ $$
 
 ### 4.7 손실 가중치 설정
 
+#### 4.7.1 기본 가중치 (Non-Causal)
+
 | 가중치 | 기본값 | 역할 |
 |--------|--------|------|
-| $\lambda_{\text{bit}}$ | 2.0 | 비트 정확도 압박 강도 |
-| $\lambda_{\text{audio}}$ | 50.0 | 음질 보존 압박 강도 |
-| $\lambda_{\text{stft}}$ | 10.0 | 스펙트럼 보존 |
-| $\lambda_{\text{l1}}$ | 1.0 | 파형 수준 SNR |
-| $\lambda_{\text{adv}}$ | 0.05 | 자연스러움 |
-| $\lambda_{\text{det}}$ | 0.1 | 탐지 확실성 |
+| $\lambda_{\text{bit}}$ | 10.0 | 비트 정확도 압박 강도 (BER 개선) |
+| $\lambda_{\text{audio}}$ | 10.0 | Mel 스펙트로그램 기반 음질 보존 |
+| $\lambda_{\text{stft}}$ | 2.0 | 스펙트럼 수렴성 및 크기 보존 |
+| $\lambda_{\text{l1}}$ | 10.0 | 파형 수준 SNR 직접 개선 (Waveform L1) |
+| $\lambda_{\text{adv}}$ | 0.1 | 자연스러움 (Adversarial Loss) |
+| $\lambda_{\text{det}}$ | 0.5 | 워터마크 탐지 신뢰도 (Detection Loss) |
 
-**설계 원칙**: $\lambda_{\text{audio}} \gg \lambda_{\text{bit}}$으로 설정하여 **음질을 최우선**으로 보존한다. 비트 정확도는 BCH(511, 128) 오류 정정 코드가 최대 10%의 BER을 허용하므로, 완벽하지 않아도 된다.
+#### 4.7.2 Causal 모델 가중치
+
+Causal 모델은 미래 정보 없이 동작하므로, 더 강한 음질 보존 압력이 필요하다:
+
+| 가중치 | Causal 설정 | 변경 이유 |
+|--------|-------------|-----------|
+| $\lambda_{\text{bit}}$ | **2.0** | Bit Warmup으로 초기 집중 후 낮춤 |
+| $\lambda_{\text{audio}}$ | **50.0** | 음질 보존 최우선 (5배 증가) |
+| $\lambda_{\text{stft}}$ | **10.0** | 스펙트럼 일관성 강화 |
+| $\lambda_{\text{l1}}$ | **30.0** | SNR 직접 개선 (3배 증가) |
+| $\lambda_{\text{adv}}$ | 0.1 | 동일 |
+| $\lambda_{\text{det}}$ | 0.5 | 동일 |
+| $\alpha_{\text{encoder}}$ | **0.35** | 섭동 상한 증가 (기본 0.25) |
+
+#### 4.7.3 Focal Loss (선택적)
+
+Class imbalance 문제(쉬운 비트 vs 어려운 비트)를 해결하기 위해 **Focal Loss**를 선택적으로 적용할 수 있다:
+
+$$
+\mathcal{L}_{\text{Focal}} = -\alpha_t (1 - p_t)^\gamma \log(p_t)
+$$
+
+여기서:
+- $p_t$: 정답 클래스의 예측 확률
+- $\gamma$: Focusing 파라미터 (기본값: 2.0). 높을수록 어려운 샘플에 집중
+- $\alpha_t$: 클래스별 가중치
+
+Focal Loss는 쉬운 샘플(잘 맞추는 비트)의 손실 기여도를 $(1-p_t)^\gamma$로 줄이고, 어려운 샘플에 학습을 집중시킨다.
+
+#### 4.7.4 Label Smoothing
+
+완전한 0/1 대신 부드러운 레이블을 사용하여 과적합을 방지한다:
+
+$$
+y_{\text{smoothed}} = y \cdot (1 - \epsilon) + \frac{\epsilon}{2}
+$$
+
+기본 설정에서 $\epsilon = 0.1$을 사용하여 목표값이 0.05와 0.95가 된다.
+
+**설계 원칙**: $\lambda_{\text{audio}} + \lambda_{\text{l1}} \gg \lambda_{\text{bit}}$으로 설정하여 **음질을 최우선**으로 보존한다. 비트 정확도는 RS(16,12) 오류 정정 코드가 최대 2바이트(~12.5% BER)를 정정하므로, 완벽하지 않아도 된다.
 
 ---
 
@@ -907,21 +997,62 @@ CallCops의 학습은 **End-to-End(종단 간)** 방식이다. 인코더와 디�
 | 항목 | 설정 |
 |------|------|
 | Optimizer | Adam ($\beta_1 = 0.5$, $\beta_2 = 0.9$) |
-| Learning Rate | $1 \times 10^{-5}$ |
+| Learning Rate | $2 \times 10^{-4}$ |
 | LR Scheduler | ReduceLROnPlateau (factor=0.5, patience=3) |
 | Gradient Clipping | Max norm = 1.0 |
 | Mixed Precision | BFloat16 (AMP) |
-| Batch Size | 24 |
+| Batch Size | 64 |
 | Epochs | 100 |
 
 ### 6.3 동적 가중치 제어 (Dynamic Weight Controller)
 
 학습 중 BER과 SNR을 모니터링하여 가중치를 **자동 조정**한다:
 
-- **BER < 2%** (비트 과최적화): $\lambda_{\text{bit}} \leftarrow \max(0.1, \lambda_{\text{bit}} \times 0.8)$
-- **SNR < 15dB** (음질 저하): $\lambda_{\text{audio}} \leftarrow \min(500, \lambda_{\text{audio}} \times 1.1)$
+#### 6.3.1 Bit Warmup 단계
 
-이를 통해 **파괴적 수렴(Destructive Convergence)** — 비트 정확도를 위해 음질을 희생하는 현상 — 을 방지한다.
+초기 학습 시 비트 정확도를 빠르게 안정화하기 위해 **Bit Warmup** 전략을 적용한다:
+
+```python
+if epoch < bit_warmup_epochs:  # 기본값: 10 epochs
+    lambda_bit = 10.0  # 높은 비트 가중치로 시작
+else:
+    lambda_bit = 2.0   # 워밍업 후 낮춤
+```
+
+**효과:**
+1. 초기 10 에포크 동안 비트 임베딩 패턴을 강하게 학습
+2. 이후 음질 보존에 집중 ($\lambda_{\text{audio}}$, $\lambda_{\text{l1}}$ 상대적 증가)
+3. 비트 정확도와 음질 사이의 균형 달성
+
+#### 6.3.2 SNR 기반 자동 조정
+
+| 조건 | 행동 | 목적 |
+|------|------|------|
+| SNR < 10dB (critical) | $\lambda_{\text{bit}} \leftarrow \max(0.5, \lambda_{\text{bit}} \times 0.7)$ | 비트 압력 급감 |
+| SNR < 15dB (target) | $\lambda_{\text{audio}} \leftarrow \min(500, \lambda_{\text{audio}} \times 1.1)$ | 음질 압력 증가 |
+| BER < 2% | $\lambda_{\text{bit}} \leftarrow \max(0.1, \lambda_{\text{bit}} \times 0.8)$ | 과최적화 방지 |
+
+#### 6.3.3 파괴적 수렴 방지
+
+DWC는 **파괴적 수렴(Destructive Convergence)** 현상을 방지한다:
+
+```text
+파괴적 수렴 시나리오:
+┌─────────────────────────────────────────────────────────────────┐
+│ Epoch 1-5:  BER 50% → 20% (개선)     SNR 25dB → 20dB (감소)   │
+│ Epoch 5-10: BER 20% → 5% (개선)      SNR 20dB → 12dB (급락!)  │
+│ Epoch 10+:  BER 2% (최적화됨)         SNR 8dB (음질 파괴)      │
+└─────────────────────────────────────────────────────────────────┘
+
+DWC 개입 후:
+┌─────────────────────────────────────────────────────────────────┐
+│ Epoch 1-5:  BER 50% → 20% (개선)     SNR 25dB → 22dB (안정)   │
+│ Epoch 5-10: BER 20% → 10% (개선)     SNR 22dB → 20dB (완만)   │
+│ Epoch 10+:  BER 8% (RS로 정정 가능)   SNR 18dB (음질 보존)     │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+이를 통해 RS(16,12) 오류 정정 범위(~12.5% BER) 내에서 비트 정확도를 유지하면서, SNR 15dB 이상의 음질을 확보한다.
 
 ### 6.4 조기 종료 (Early Stopping)
 
@@ -987,6 +1118,47 @@ x = F.pad(x, (causal_padding, 0))      # (left, right=0)
 ```
 
 이로써 출력의 각 샘플이 **오직 과거 입력에만 의존**하게 된다.
+
+#### 8.2.1 InstanceNorm vs BatchNorm: 스트리밍을 위한 정규화 선택
+
+스트리밍 추론에서 정규화 레이어의 선택은 매우 중요하다.
+
+**BatchNorm의 문제점:**
+
+BatchNorm은 학습 시 배치 통계(평균, 분산)를 계산하고, 추론 시 **러닝 통계(running statistics)**를 사용한다:
+
+```python
+# 학습 시
+mean = batch.mean(dim=[0, 2])  # 배치와 시간 축에 대해 평균
+var = batch.var(dim=[0, 2])
+
+# 추론 시 (문제!)
+mean = running_mean  # 5.12초 전체 학습 데이터 기반
+var = running_var
+```
+
+러닝 통계는 **5.12초(128프레임)** 전체 오디오를 기준으로 계산되었다. 스트리밍에서 40ms 단일 프레임만 입력하면, 통계 분포가 크게 다르고 출력이 불안정해진다.
+
+**InstanceNorm의 해결책:**
+
+InstanceNorm은 **샘플별, 채널별**로 독립적으로 정규화한다:
+
+```python
+# InstanceNorm: 샘플별 정규화 (배치 무관)
+mean = x.mean(dim=2, keepdim=True)  # 시간 축에만 평균
+var = x.var(dim=2, keepdim=True)
+x_norm = (x - mean) / sqrt(var + eps)
+```
+
+| 특성 | BatchNorm | InstanceNorm |
+|------|-----------|--------------|
+| 정규화 범위 | 배치 전체 + 시간 전체 | 단일 샘플의 시간 축만 |
+| 러닝 통계 | 필요 (학습 시 누적) | 불필요 |
+| 입력 길이 의존성 | 높음 (길이 민감) | **없음** |
+| 스트리밍 호환성 | ❌ 불안정 | ✅ 안정 |
+| 학습 시 배치 효과 | 정규화 효과 강함 | 개별 샘플만 정규화 |
+
+**결론:** Causal 모델은 **InstanceNorm1d**를 사용하여 입력 길이에 무관한 안정적인 스트리밍 추론을 보장한다.
 
 ### 8.3 Receptive Field (수용 영역)
 
@@ -1098,9 +1270,9 @@ Non-Causal은 양쪽 합산 후 반으로 나눈 **편측 RF**이고, Causal은 
 
 ### 8.4 스트리밍 추론
 
-#### Non-Causal 스트리밍 (StreamingEncoderWrapper)
+#### 8.4.1 Non-Causal 스트리밍: 단일 프레임 vs 미니배치
 
-Non-Causal 모델은 대칭 패딩으로 인해 미래 샘플이 필요하다. 이를 해결하기 위해 **롤링 히스토리 버퍼**를 유지한다:
+**기존 방식 (단일 프레임):**
 
 ```
 [히스토리 5프레임: 1,600 samples] + [새 프레임: 320 samples] = 1,920 samples
@@ -1110,11 +1282,47 @@ Non-Causal 모델은 대칭 패딩으로 인해 미래 샘플이 필요하다. �
                                               출력에서 마지막 320 samples만 추출
 ```
 
-- 히스토리에는 **원본(RAW) 오디오**를 저장 (워터마크 오디오를 저장하면 이중 삽입 발생)
+이 방식은 매 40ms마다 ONNX 추론을 호출하여 **10초당 250회**의 추론이 필요하다.
+
+**최적화된 방식 (미니배치):**
+
+브라우저 환경에서 ONNX Runtime Web의 오버헤드를 줄이기 위해 **미니배치 처리**를 도입했다:
+
+```javascript
+// StreamingEncoderWrapper.js 설정
+const BATCH_FRAMES = 32;     // 한 번에 처리할 프레임 수 (1.28초)
+const HISTORY_FRAMES = 8;    // 히스토리 프레임 수 (320ms)
+```
+
+```
+┌─────────────────────────────────────────────────────────────────────┐
+│  History Buffer (8 frames)  │  Batch Buffer (32 frames)            │
+│        2,560 samples        │       10,240 samples                 │
+│         (320ms)             │         (1.28s)                      │
+└─────────────────────────────────────────────────────────────────────┘
+                              │
+                    ONNX 추론 (한 번에 12,800 samples)
+                              │
+                    출력에서 마지막 10,240 samples 추출
+                              │
+                    watermarkedChunks에 320 samples씩 32회 push
+```
+
+**성능 비교:**
+
+| 방식 | ONNX 호출 (10초당) | 레이턴시 | 메모리 사용 |
+|------|-------------------|----------|-------------|
+| 단일 프레임 | 250회 | 40ms | 낮음 |
+| 미니배치(32) | **~8회** | 1,280ms | 중간 |
+
+미니배치 방식은 ONNX 호출 횟수를 **97% 감소**시켜 브라우저 환경에서의 CPU 부하를 크게 줄인다.
+
+**히스토리 관리 주의사항:**
+- 히스토리 버퍼에는 **원본(RAW) 오디오**를 저장 (워터마크 오디오를 저장하면 이중 삽입 발생)
 - 메시지 회전(rotation)으로 글로벌 비트 인덱스 동기화:
   $$\text{offset} = (\text{globalFrameIndex} - \text{historyFilled}) \bmod 128$$
 
-#### Causal 스트리밍 (CausalStreamingEncoder)
+#### 8.4.2 Causal 스트리밍 (CausalStreamingEncoder)
 
 Causal 모델은 히스토리 버퍼 없이 320 samples 하나만 입력하면 된다:
 
@@ -1188,7 +1396,7 @@ $$
 \text{BER} = \frac{1}{N}\sum_{i=1}^{N}\mathbb{1}[\hat{b}_i \neq b_i]
 $$
 
-복원된 비트 중 오류 비율. 낮을수록 좋다. BCH 오류 정정을 적용하면 10%까지 허용 가능하다.
+복원된 비트 중 오류 비율. 낮을수록 좋다. RS(16,12) 오류 정정을 적용하면 최대 2바이트(~12.5% BER)까지 완전 정정 가능하다.
 
 ### 10.3 PESQ (Perceptual Evaluation of Speech Quality)
 
@@ -1226,11 +1434,17 @@ ITU-T P.862 표준 음질 평가 지표. 1.0(최악) ~ 4.5(최상). 목표는 4.
 ## 부록 B: 128비트 페이로드 구조
 
 ```
-비트 위치    : [0───15] [16──────47] [48──────────111] [112────127]
-내용         : Sync     Timestamp    Auth Data         CRC-16
-크기         : 16-bit   32-bit       64-bit            16-bit
-역할         : 동기화    시각 정보     인증 데이터        무결성 검증
+비트 위치    : [0───15] [16──────47] [48─────────95] [96─────127]
+내용         : Sync     Timestamp    Auth Data       RS Parity
+크기         : 16-bit   32-bit       48-bit          32-bit
+역할         : 동기화    시각 정보     인증 데이터      오류 정정
 ```
+
+**Reed-Solomon RS(16,12) 인코딩:**
+
+1. 데이터 12 bytes = Sync(2B) + Timestamp(4B) + Auth(6B)
+2. 4 bytes 패리티 생성 (GF(2⁸) 상의 다항식 연산)
+3. 최대 2 byte 오류 정정, 4 byte 오류 검출
 
 ## 부록 C: 용어 정리
 
@@ -1250,5 +1464,10 @@ ITU-T P.862 표준 음질 평가 지표. 1.0(최악) ~ 4.5(최상). 목표는 4.
 | BER | Bit Error Rate. 비트 오류율 |
 | SNR | Signal-to-Noise Ratio. 신호 대 잡음비 |
 | PESQ | Perceptual Evaluation of Speech Quality. 지각적 음질 평가 지표 |
-| BCH Code | Bose-Chaudhuri-Hocquenghem 오류 정정 코드 |
+| Reed-Solomon | RS 오류 정정 코드. Galois Field 상의 다항식 기반 FEC |
+| GF(2⁸) | Galois Field with 256 elements. RS 코드의 연산 기반 유한체 |
+| Focal Loss | Class imbalance를 해결하는 손실 함수. 어려운 샘플에 집중 |
+| Label Smoothing | 과적합 방지를 위해 목표값을 부드럽게 조정하는 기법 |
+| DWC | Dynamic Weight Controller. BER/SNR 기반 손실 가중치 자동 조정 |
+| Bit Warmup | 학습 초기 비트 가중치를 높여 패턴 학습을 가속화하는 전략 |
 | ONNX | Open Neural Network Exchange. 모델 교환 표준 형식 |
