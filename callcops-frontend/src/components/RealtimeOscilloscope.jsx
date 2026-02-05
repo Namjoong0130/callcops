@@ -238,9 +238,14 @@ export function RealtimeOscilloscope({
       }
       ctx.strokeStyle = 'rgba(192,132,252,0.95)'; ctx.lineWidth = 2; ctx.stroke();
 
-      // Legend
+      // Legend + sync indicator
       ctx.fillStyle = '#e2e8f0'; ctx.font = 'bold 11px sans-serif'; ctx.textAlign = 'left';
       ctx.fillText('Real-Time Frequency Spectrum', PL, 16);
+      
+      // 동기화 상태 표시 (RealtimeEmbedDemo에서 동기화 처리됨)
+      ctx.fillStyle = '#22c55e'; ctx.font = '9px sans-serif';
+      ctx.fillText('● synced', PL + 195, 16);
+      
       const lx = PL + pW - 250;
       ctx.fillStyle = 'rgba(56,189,248,0.9)';  ctx.fillRect(lx, 7, 14, 4);
       ctx.fillStyle = '#94a3b8'; ctx.font = '10px sans-serif'; ctx.fillText('Original', lx + 18, 13);
