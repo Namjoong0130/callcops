@@ -1,19 +1,26 @@
 {
   "expo": {
-    "name": "callcops-app",
+    "name": "Callcops",
     "slug": "callcops-app",
     "version": "1.0.0",
     "orientation": "portrait",
     "icon": "./assets/icon.png",
     "userInterfaceStyle": "light",
-    "newArchEnabled": false,
+    "newArchEnabled": true,
     "splash": {
       "image": "./assets/splash-icon.png",
       "resizeMode": "contain",
       "backgroundColor": "#ffffff"
     },
+    "assetBundlePatterns": [
+      "**/*"
+    ],
     "ios": {
-      "supportsTablet": true
+      "supportsTablet": true,
+      "bundleIdentifier": "com.madcamp.callcops",
+      "infoPlist": {
+        "NSMicrophoneUsageDescription": "워터마크 삽입을 위해 마이크 접근 권한이 필요합니다."
+      }
     },
     "android": {
       "adaptiveIcon": {
@@ -21,14 +28,19 @@
         "backgroundColor": "#ffffff"
       },
       "edgeToEdgeEnabled": true,
-      "package": "com.anonymous.callcopsapp"
+      "package": "com.anonymous.callcopsapp",
+      "permissions": [
+        "android.permission.RECORD_AUDIO",
+        "android.permission.MODIFY_AUDIO_SETTINGS"
+      ]
     },
     "web": {
       "favicon": "./assets/favicon.png"
     },
     "plugins": [
       "onnxruntime-react-native",
-      "expo-asset"
+      "expo-asset",
+      "expo-audio"
     ]
   }
 }

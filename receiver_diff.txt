@@ -1,0 +1,38 @@
+--- /Users/nj7stars/Desktop/madcamp/wk4/callcops/callcops-app/src/components/ReceiverMode.jsx	2026-02-04 05:41:41
++++ reference_receiver.jsx	2026-02-04 05:42:47
+@@ -156,9 +156,9 @@
+     // Read WAV file and get audio samples
+     const readWavFile = async (uri) => {
+         try {
+-            // Optimization: Increased to 50MB to support longer files (approx 5 mins HQ / 50 mins LowQ)
+-            // Was 2MB which cut off after ~10s of HQ audio
+-            const MAX_READ_SIZE = 50 * 1024 * 1024;
++            // Optimization: Read only first 2MB (approx 10-20 seconds depending on quality)
++            // This prevents blocking the UI for long files
++            const MAX_READ_SIZE = 2 * 1024 * 1024;
+ 
+             const fileInfo = await FileSystem.getInfoAsync(uri);
+             if (!fileInfo.exists) throw new Error('File not found');
+@@ -360,19 +360,9 @@
+             setCurrentChunkProbs(null);  // Clear instant grid
+             setBitProbs(null);  // Clear accumulated grid
+ 
+-            // Load Model with dynamic ONNX check (handles cold start)
+-            // Use checkOnnxAvailable() for fresh check instead of stale state
+-            const onnxReady = inference.checkOnnxAvailable
+-                ? inference.checkOnnxAvailable()
+-                : inference.onnxAvailable;
+-
+-            if (onnxReady) {
+-                try {
+-                    await inference.loadDecoder();
+-                    console.log('ONNX decoder loaded successfully');
+-                } catch (e) {
+-                    console.warn('ONNX decoder load failed, will use fallback:', e.message);
+-                }
++            // Load Model
++            if (inference.onnxAvailable) {
++                await inference.loadDecoder();
+             }
+ 
+             // Play Audio
