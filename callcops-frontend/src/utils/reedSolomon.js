@@ -174,11 +174,13 @@ function deinterleaveBits(interleaved) {
 // =============================================================================
 
 /**
- * Convert 128-bit array to 16 bytes (with interleaving for RS)
+ * Convert 128-bit array to 16 bytes (NO interleaving for now - model not trained with it)
  */
 export function bitsToBytes(bits) {
-  // First interleave to spread consecutive errors
-  const interleaved = interleaveBits(bits);
+  // NOTE: Interleaving disabled because the model was not trained with interleaved data
+  // If you want interleaving, uncomment the line below:
+  // const interleaved = interleaveBits(bits);
+  const interleaved = bits; // No interleaving
   
   const bytes = new Uint8Array(16);
   for (let i = 0; i < 128; i++) {
@@ -192,7 +194,7 @@ export function bitsToBytes(bits) {
 }
 
 /**
- * Convert 16 bytes to 128-bit Float32Array (with deinterleaving)
+ * Convert 16 bytes to 128-bit Float32Array (NO deinterleaving for now)
  */
 export function bytesToBits(bytes) {
   const interleaved = new Float32Array(128);
@@ -201,15 +203,19 @@ export function bytesToBits(bytes) {
     const bitIdx = 7 - (i % 8);
     interleaved[i] = (bytes[byteIdx] >> bitIdx) & 1;
   }
-  // Deinterleave to restore original bit order
-  return deinterleaveBits(interleaved);
+  // NOTE: Deinterleaving disabled because the model was not trained with interleaved data
+  // If you want deinterleaving, uncomment the line below:
+  // return deinterleaveBits(interleaved);
+  return interleaved; // No deinterleaving
 }
 
 /**
- * Convert 96 data bits to 12 bytes (with interleaving)
+ * Convert 96 data bits to 12 bytes (NO interleaving for now)
  */
 export function dataBitsToBytes(bits) {
-  // Interleave 96 bits across 12 bytes
+  // NOTE: Interleaving disabled - model not trained with it
+  // Original interleaving code commented out below
+  /*
   const interleaved = new Float32Array(96);
   for (let i = 0; i < 96; i++) {
     const byteIdx = i % 12;
@@ -217,6 +223,8 @@ export function dataBitsToBytes(bits) {
     const newIdx = byteIdx * 8 + bitInByte;
     interleaved[newIdx] = bits[i];
   }
+  */
+  const interleaved = bits; // No interleaving
   
   const bytes = new Uint8Array(12);
   for (let i = 0; i < 96; i++) {
@@ -230,7 +238,7 @@ export function dataBitsToBytes(bits) {
 }
 
 /**
- * Convert 12 bytes to 96 data bits (with deinterleaving)
+ * Convert 12 bytes to 96 data bits (NO deinterleaving for now)
  */
 export function dataBytesToBits(bytes) {
   // First extract bits from bytes
@@ -241,7 +249,9 @@ export function dataBytesToBits(bytes) {
     interleaved[i] = (bytes[byteIdx] >> bitIdx) & 1;
   }
   
-  // Deinterleave: reverse the interleaving
+  // NOTE: Deinterleaving disabled - model not trained with it
+  // Original deinterleaving code commented out below
+  /*
   const bits = new Float32Array(96);
   for (let i = 0; i < 96; i++) {
     const byteIdx = i % 12;
@@ -250,6 +260,8 @@ export function dataBytesToBits(bytes) {
     bits[i] = interleaved[newIdx];
   }
   return bits;
+  */
+  return interleaved; // No deinterleaving
 }
 
 // =============================================================================

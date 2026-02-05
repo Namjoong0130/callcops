@@ -179,14 +179,19 @@ export function RealtimeEmbedDemo({ onEmbed, createStreamingEncoder, isModelRead
           const watermarkedFrame = await wrapper.processFrame(frameBuf, msg);
           const latency = performance.now() - startTime;
 
-          watermarkedChunksRef.current.push(watermarkedFrame);
+          // Mini-batch: processFrame may return null while buffering
+          if (watermarkedFrame) {
+            watermarkedChunksRef.current.push(watermarkedFrame);
+          }
 
           latenciesRef.current.push(latency);
           if (latenciesRef.current.length > 50) latenciesRef.current.shift();
 
           // Update output visualization buffer (input vis is updated in audio callback)
-          visOutputRef.current.copyWithin(0, FRAME_SAMPLES);
-          visOutputRef.current.set(watermarkedFrame, VIS_BUFFER_SIZE - FRAME_SAMPLES);
+          if (watermarkedFrame) {
+            visOutputRef.current.copyWithin(0, FRAME_SAMPLES);
+            visOutputRef.current.set(watermarkedFrame, VIS_BUFFER_SIZE - FRAME_SAMPLES);
+          }
 
           framesProcessed++;
 
@@ -313,10 +318,13 @@ export function RealtimeEmbedDemo({ onEmbed, createStreamingEncoder, isModelRead
 
       const actualRate = audioContext.sampleRate;
       const needsResample = actualRate !== SAMPLE_RATE;
-      if (needsResample) {
-        console.warn(`AudioContext sampleRate: ${actualRate}Hz (requested ${SAMPLE_RATE}Hz). Will downsample.`);
-      }
       const resampleRatio = needsResample ? SAMPLE_RATE / actualRate : 1;
+
+      // Diagnostic: log actual vs requested sample rate
+      console.log(`[Streaming] AudioContext: ${actualRate}Hz (requested ${SAMPLE_RATE}Hz)` +
+        (needsResample
+          ? ` → Downsampling ${(1/resampleRatio).toFixed(1)}:1 with anti-aliasing filter`
+          : ` → Native rate, no resampling needed`));
 
       const source = audioContext.createMediaStreamSource(stream);
       sourceRef.current = source;
@@ -324,6 +332,30 @@ export function RealtimeEmbedDemo({ onEmbed, createStreamingEncoder, isModelRead
       const bufferSize = 2048;
       const processor = audioContext.createScriptProcessor(bufferSize, 1, 1);
       processorRef.current = processor;
+
+      // Anti-aliasing filter chain: 4th-order Butterworth low-pass at Nyquist (4kHz)
+      // Prevents aliasing when decimating from high sample rates to 8kHz.
+      // Without this, frequencies above 4kHz fold into 0-4kHz and corrupt the signal,
+      // making the decoder unable to reliably extract watermark bits.
+      if (needsResample) {
+        const lpf1 = audioContext.createBiquadFilter();
+        lpf1.type = 'lowpass';
+        lpf1.frequency.value = SAMPLE_RATE / 2; // 4000 Hz Nyquist
+        lpf1.Q.value = 0.707; // Butterworth
+
+        const lpf2 = audioContext.createBiquadFilter();
+        lpf2.type = 'lowpass';
+        lpf2.frequency.value = SAMPLE_RATE / 2;
+        lpf2.Q.value = 0.707;
+
+        source.connect(lpf1);
+        lpf1.connect(lpf2);
+        lpf2.connect(processor);
+        console.log('[Streaming] Anti-aliasing: 4th-order Butterworth LPF @ 4kHz');
+      } else {
+        source.connect(processor);
+      }
+      processor.connect(audioContext.destination);
 
       processor.onaudioprocess = (e) => {
         if (!isStreamingRef.current) return;
@@ -334,7 +366,7 @@ export function RealtimeEmbedDemo({ onEmbed, createStreamingEncoder, isModelRead
         // Pass through audio for monitoring
         outputData.set(inputData);
 
-        // Downsample if needed
+        // Downsample if needed (now with anti-aliased input from BiquadFilter chain)
         let audioChunk;
         if (needsResample) {
           const outLen = Math.floor(inputData.length * resampleRatio);
@@ -363,9 +395,6 @@ export function RealtimeEmbedDemo({ onEmbed, createStreamingEncoder, isModelRead
           visBuf.set(audioChunk.subarray(chunkLen - VIS_BUFFER_SIZE));
         }
       };
-
-      source.connect(processor);
-      processor.connect(audioContext.destination);
 
       isStreamingRef.current = true;
       isProcessingRef.current = false;
@@ -408,6 +437,11 @@ export function RealtimeEmbedDemo({ onEmbed, createStreamingEncoder, isModelRead
 
     // Count how many frames were already watermarked in real-time
     const watermarkedFrameCount = watermarkedChunksRef.current.length;
+    const wrapperFrameIdx = wrapper?.frameIndex ?? 0;
+
+    console.log(`[Streaming] Stop: ${watermarkedFrameCount} frames watermarked in real-time, ` +
+      `wrapper.frameIndex=${wrapperFrameIdx}, ` +
+      `rawChunks=${rawChunksRef.current.length}`);
 
     // Reconstruct the FULL raw audio from rawChunksRef (guaranteed complete)
     const rawTotal = rawTotalSamplesRef.current;
@@ -438,8 +472,11 @@ export function RealtimeEmbedDemo({ onEmbed, createStreamingEncoder, isModelRead
 
         try {
           const watermarkedFrame = await wrapper.processFrame(drainFrame, msg);
-          watermarkedChunksRef.current.push(watermarkedFrame);
-          drainedCount++;
+          // Mini-batch: may return null while buffering
+          if (watermarkedFrame) {
+            watermarkedChunksRef.current.push(watermarkedFrame);
+            drainedCount++;
+          }
 
           if (drainedCount % 10 === 0) {
             setFinalizeProgress(`${watermarkedFrameCount + drainedCount}/${totalFrames} frames`);
@@ -449,6 +486,17 @@ export function RealtimeEmbedDemo({ onEmbed, createStreamingEncoder, isModelRead
           console.error('Drain frame error:', err);
           break;
         }
+      }
+
+      // Flush any remaining buffered frames from mini-batch
+      try {
+        const flushedFrames = await wrapper.flush(msg);
+        for (const frame of flushedFrames) {
+          watermarkedChunksRef.current.push(frame);
+          drainedCount++;
+        }
+      } catch (err) {
+        console.error('Flush error:', err);
       }
 
       setFinalizeProgress(`${watermarkedFrameCount + drainedCount}/${totalFrames} frames (done)`);
@@ -468,6 +516,11 @@ export function RealtimeEmbedDemo({ onEmbed, createStreamingEncoder, isModelRead
       setRecordedAudio(finalAudio);
       const blob = encodeWav(finalAudio);
       setRecordedAudioUrl(URL.createObjectURL(blob));
+
+      const durationSec = (finalAudio.length / SAMPLE_RATE).toFixed(2);
+      const totalWmFrames = chunks.length;
+      const cycles = (totalWmFrames / PAYLOAD_LENGTH).toFixed(2);
+      console.log(`[Streaming] Final: ${totalWmFrames} frames (${durationSec}s), ${cycles} cycles of 128-bit payload`);
     }
 
     setIsFinalizing(false);
@@ -556,7 +609,7 @@ export function RealtimeEmbedDemo({ onEmbed, createStreamingEncoder, isModelRead
             <svg className="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
               <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5l7 7-7 7" />
             </svg>
-            <span className="px-2 py-0.5 bg-purple-500/15 text-purple-400 rounded">Encoder (1920→320)</span>
+            <span className="px-2 py-0.5 bg-purple-500/15 text-purple-400 rounded">Encoder (640→320)</span>
             <svg className="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
               <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5l7 7-7 7" />
             </svg>

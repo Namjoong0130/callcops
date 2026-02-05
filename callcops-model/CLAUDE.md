@@ -144,23 +144,17 @@ npm run lint
 
 Each 40ms audio frame embeds exactly 1 bit. Frame `i` maps to `message[i % 128]`. After 128 frames (5.12s), the full message repeats. The decoder extracts per-frame bits and aggregates across cycle boundaries.
 
-### Two Model Variants
+### Model Architecture — Causal (`rtaw_net_causal.py`)
 
-#### 1. Non-Causal (`rtaw_net.py`) — Symmetric Padding
-
-- Standard Conv1d with symmetric (center) padding
-- BatchNorm1d normalization
-- One-sided receptive field: ~57 samples (~7ms)
-- Requires rolling history buffer for streaming (see StreamingEncoderWrapper)
-- Alpha range: [0.25, 1.0] (SNR rescue mode)
-
-#### 2. Causal (`rtaw_net_causal.py`) — Zero Look-Ahead
+**Production model** — Zero look-ahead, designed for real-time streaming.
 
 - Left-only padding: `pad = (kernel_size - 1) * dilation`
 - InstanceNorm1d for streaming stability (no batch statistics)
-- Receptive field: ~78 samples (~9.75ms), all past
-- No history buffer needed — single frame in, single frame out
-- Designed for VoIP real-time deployment
+- Receptive field: ~78 samples (~9.75ms), all past context
+- `frame_offset` parameter for correct cyclic alignment in streaming
+- Alpha range: [0.35, 1.0]
+
+Note: `rtaw_net.py` (non-causal, symmetric padding) is kept for reference but is NOT used in production.
 
 ### Encoder Pipeline
 
@@ -216,9 +210,9 @@ Watermarked Audio [B, 1, T]
 
 ## Streaming Architecture
 
-### Non-Causal Streaming (`StreamingEncoderWrapper`)
+### Causal Streaming (`StreamingEncoderWrapper`)
 
-The non-causal model uses symmetric padding, meaning each output sample depends on both past and future context. The `StreamingEncoderWrapper` solves this by maintaining a rolling history buffer:
+The causal model uses left-only padding, so each output sample depends only on past context. The `StreamingEncoderWrapper` maintains 1 frame of history (320 samples, well beyond the ~78-sample causal RF):
 
 ```
 40ms frame (320 samples) arrives
@@ -227,31 +221,31 @@ The non-causal model uses symmetric padding, meaning each output sample depends 
 ┌─────────────────────────────────────┐
 │ StreamingEncoderWrapper             │
 │                                     │
-│ historyBuffer [5×320 = 1600]        │
+│ historyBuffer [1×320 = 320]         │
 │ + new frame [320]                   │
-│ = 1920 samples → ONNX inference    │
+│ = 640 samples → ONNX inference     │
 │                                     │
 │ Message rotation:                   │
 │   offset = (globalFrameIndex        │
-│             - historyFilled) % 128  │
+│             - HISTORY_FRAMES) % 128 │
 │                                     │
 │ Output: watermarked.slice(-320)     │
-│ History: shift left, append RAW     │
+│ History: replace with RAW frame     │
 │ globalFrameIndex++                  │
 └─────────────────────────────────────┘
 ```
 
-**Why 5 history frames**: 1600 samples = 28x the one-sided RF (~57 samples). Ensures stable context and zero edge artifacts.
+**Why 1 history frame**: 320 samples > 78-sample causal RF. Since the causal model has zero look-ahead, there is no future context issue.
 
 **Why RAW history**: Feeding watermarked history back would cause double-embedding.
+
+**Message rotation**: The ONNX model has `frame_offset=0` baked in (not a dynamic input), so we pre-rotate the 128-bit message to compensate: `offset = (globalFrameIndex - HISTORY_FRAMES) % 128`.
 
 **Implementations**:
 - JS: `callcops-frontend/src/utils/StreamingEncoderWrapper.js`
 - Python: `callcops-model/models/streaming.py`
 
-### Causal Streaming (`CausalStreamingEncoder`)
-
-The causal model needs no history buffer — each frame depends only on past samples. Single frame in, single frame out. Defined in `rtaw_net_causal.py`.
+Note: `CausalStreamingEncoder` in `rtaw_net_causal.py` is a native PyTorch implementation that uses `frame_offset` directly, without needing message rotation.
 
 ## Loss Configuration
 
@@ -391,10 +385,8 @@ Browser operates at 44.1/48kHz. Use OfflineAudioContext for polyphase interpolat
 - Modified `export_onnx.py` — added `validate_streaming_shape()` for dynamic input sizes
 
 **Key Findings:**
-- Actual encoder receptive field: ~57 samples one-sided (~7ms), NOT 191ms
 - ONNX encoder already supports dynamic `audio_length` — no model re-export needed
-- 5 history frames (1600 samples) provides 28x the RF — eliminates edge artifacts
-- Message rotation formula: `offset = (globalFrameIndex - historyFilled) % 128`
+- Message rotation formula: `offset = (globalFrameIndex - HISTORY_FRAMES) % 128`
 
 ### 2026-02-03 Session (User Changes)
 
@@ -408,6 +400,21 @@ Browser operates at 44.1/48kHz. Use OfflineAudioContext for polyphase interpolat
 **Streaming Refinements:**
 - RealtimeEmbedDemo refactored to queue-based architecture (ScriptProcessor → inputQueue → processLoop)
 - Fixed unnecessary message rotation in streaming mode
+
+### 2026-02-05 Session
+
+**Causal-Only Migration:**
+- Rewrote `StreamingEncoderWrapper.js` for causal model: HISTORY_FRAMES=1 (was 5), TOTAL_SAMPLES=640 (was 1920)
+- Rewrote `streaming.py` for causal model: default history_frames=1, fixed `is_warmed_up` bug
+- Updated `RealtimeEmbedDemo.jsx` pipeline label: Encoder (640→320) (was 1920→320)
+- Updated CLAUDE.md streaming architecture docs
+
+**Streaming Quality Fixes (earlier in session):**
+- Fixed message rotation warmup bug: used constant `HISTORY_FRAMES` instead of variable `_historyFilled`
+- Added 4th-order Butterworth anti-aliasing filter (cascaded BiquadFilter @ 4kHz) for downsampling
+- Decoupled oscilloscope visualization from ONNX processing (independent rAF loop)
+
+**Note:** ONNX models in `public/models/` need to be re-exported from the causal checkpoint. The ONNX export (`export_onnx.py`) does NOT expose `frame_offset` as a dynamic input — it defaults to 0. The `StreamingEncoderWrapper` compensates via message rotation.
 
 ## Team
 

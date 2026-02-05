@@ -1,22 +1,25 @@
 """
-StreamingEncoderWrapper - Python Reference Implementation
-=========================================================
+StreamingEncoderWrapper - Python Reference Implementation (Causal Model)
+========================================================================
 
 Stateful wrapper for frame-by-frame streaming watermark embedding.
-Maintains a rolling history buffer and manages cyclic message rotation.
+Maintains a minimal rolling history buffer and manages cyclic message rotation.
 
-The encoder model uses symmetric padding (non-causal Conv1d), so each
-output sample depends on both past and future context. We maintain
-HISTORY_FRAMES of past raw audio as context. On each call, we feed
-[history + new_frame] to the encoder and extract only the last 320
-samples (the new frame's watermarked output).
+The causal encoder model uses left-only padding (causal Conv1d), so each
+output sample depends only on past context. We maintain 1 frame (320 samples)
+of past raw audio as context, which exceeds the ~78-sample causal receptive
+field. On each call, we feed [history + new_frame] (640 samples) to the
+encoder and extract only the last 320 samples (the new frame's output).
+
+Since the causal model has zero look-ahead, there is no future context
+degradation — every output sample is fully determined by past input.
 
 Usage:
-    encoder = Encoder(...)
+    encoder = CausalEncoder(...)
     encoder.load_state_dict(...)
     encoder.eval()
 
-    wrapper = StreamingEncoderWrapper(encoder, history_frames=5)
+    wrapper = StreamingEncoderWrapper(encoder, history_frames=1)
 
     for frame in audio_frames:  # Each frame is 320 samples
         watermarked_frame = wrapper.process_frame(frame, message_128)
@@ -32,21 +35,21 @@ from .rtaw_net import FRAME_SAMPLES, PAYLOAD_LENGTH
 
 class StreamingEncoderWrapper:
     """
-    Stateful wrapper for real-time frame-by-frame encoding.
+    Stateful wrapper for real-time frame-by-frame encoding (causal model).
 
     Maintains a rolling history buffer of RAW audio (not watermarked)
-    to provide temporal context for the encoder's convolutional layers.
+    to provide temporal context for the encoder's causal convolutional layers.
     Manages global frame indexing and message rotation for correct
     cyclic bit assignment across session.run() calls.
     """
 
-    def __init__(self, encoder, history_frames: int = 5):
+    def __init__(self, encoder, history_frames: int = 1):
         """
         Args:
-            encoder: CallCops Encoder model (must be in eval mode)
+            encoder: CallCops CausalEncoder model (must be in eval mode)
             history_frames: Number of past frames to keep as context.
-                           5 frames = 1600 samples = 200ms, which is
-                           28x the one-sided receptive field (~57 samples).
+                           1 frame = 320 samples, which exceeds the
+                           causal receptive field (~78 samples).
         """
         self.encoder = encoder
         self.encoder.eval()
@@ -60,7 +63,6 @@ class StreamingEncoderWrapper:
         device = next(self.encoder.parameters()).device
         self._history = torch.zeros(1, 1, self.history_samples, device=device)
         self._global_frame_index = 0
-        self._history_filled = 0
 
     @torch.no_grad()
     def process_frame(
@@ -100,10 +102,13 @@ class StreamingEncoderWrapper:
         input_audio = torch.cat([self._history, frame], dim=-1)  # [1, 1, total_samples]
 
         # 2. Compute rotation offset
-        # The model maps internal frame i → message[i % 128].
-        # We want internal frame (history_filled) → global bit (global_frame_index % 128).
-        # So we rotate by (global_frame_index - history_filled) % 128.
-        offset = ((self._global_frame_index - self._history_filled)
+        # The ONNX model maps internal frame i → message[i % 128] (frame_offset=0).
+        # We extract the LAST frame (internal index = history_frames).
+        # We want: rotated[history_frames] = original[global_frame_index % 128]
+        # Since rotated[i] = original[(i + offset) % 128]:
+        #   (history_frames + offset) % 128 = global_frame_index % 128
+        #   offset = (global_frame_index - history_frames) % 128
+        offset = ((self._global_frame_index - self.history_frames)
                   % PAYLOAD_LENGTH + PAYLOAD_LENGTH) % PAYLOAD_LENGTH
 
         # 3. Rotate message
@@ -117,15 +122,11 @@ class StreamingEncoderWrapper:
         watermarked_frame = watermarked_full[:, :, -FRAME_SAMPLES:]  # [1, 1, 320]
 
         # 6. Update history with RAW audio (not watermarked!)
-        self._history = torch.cat([
-            self._history[:, :, FRAME_SAMPLES:],
-            frame
-        ], dim=-1)
+        #    With history_frames=1, the entire buffer is replaced.
+        self._history = frame.clone()
 
         # 7. Advance state
         self._global_frame_index += 1
-        if self._history_filled < self.history_frames:
-            self._history_filled += 1
 
         return watermarked_frame.squeeze()  # [320]
 
@@ -175,25 +176,21 @@ class StreamingEncoderWrapper:
     @property
     def is_warmed_up(self) -> bool:
         """Whether the history buffer is fully populated."""
-        return self._history_filled >= self.history_frames
+        return self._global_frame_index >= self.history_frames
 
 
-def validate_streaming_vs_batch(encoder, num_frames: int = 20, history_frames: int = 5):
+def validate_streaming_vs_batch(encoder, num_frames: int = 20, history_frames: int = 1):
     """
     Validate that streaming produces similar output to batch processing.
 
-    The outputs will NOT be bit-identical because:
-    1. Streaming feeds [history+frame] while batch feeds [full_audio]
-    2. BatchNorm statistics differ for different input lengths
-    3. Edge effects from padding differ
-
-    However, after the history buffer warms up, the frames should be
-    close (within ~0.05 tolerance for well-trained models).
+    For the causal model, streaming and batch outputs should be very close
+    after the history buffer warms up (just 1 frame), since the causal model
+    uses InstanceNorm (no batch statistics dependency) and left-only padding.
 
     Args:
-        encoder: CallCops Encoder model
+        encoder: CallCops CausalEncoder model
         num_frames: Number of frames to test
-        history_frames: History buffer size for wrapper
+        history_frames: History buffer size for wrapper (default 1 for causal)
 
     Returns:
         dict with comparison statistics

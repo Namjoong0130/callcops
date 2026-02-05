@@ -20,7 +20,8 @@ import { Buffer } from 'buffer';
 import {
   StreamingEncoderWrapper,
   FRAME_SAMPLES,
-  PAYLOAD_LENGTH
+  PAYLOAD_LENGTH,
+  BATCH_FRAMES
 } from '../utils/StreamingEncoderWrapper';
 import { BANK_AUTH_KEYS, BANK_LIST, getBankById } from '../constants/bankAuthKeys';
 
@@ -313,12 +314,13 @@ export default function SenderMode({ onBack }) {
                   frame,
                   messageBitsRef.current
                 );
+                // Mini-batch: processFrame may return null while buffering
               } catch (e) {
                 encodedFrame = null;
               }
             }
 
-            // Fallback encoding if ONNX failed or unavailable
+            // Fallback encoding if ONNX failed, unavailable, or still buffering
             if (!encodedFrame) {
               encodedFrame = embedWatermarkFallback(frame, frameCountRef.current, messageBitsRef.current);
             }
@@ -424,6 +426,22 @@ export default function SenderMode({ onBack }) {
           if (flushCount % 10 === 0) {
             const remaining = Math.floor(inputBufferRef.current.length / FRAME_SAMPLES);
             setStatusText(`Flushing... ${remaining} frames remaining`);
+          }
+        }
+
+        // Flush any remaining buffered frames from mini-batch encoder
+        if (useOnnxRef.current && streamingEncoderRef.current && streamingEncoderRef.current.flush) {
+          try {
+            const flushedFrames = await streamingEncoderRef.current.flush(messageBitsRef.current);
+            for (const frame of flushedFrames) {
+              for (let i = 0; i < frame.length; i++) {
+                encodedBufferRef.current.push(frame[i]);
+              }
+              frameCountRef.current++;
+            }
+            console.log(`Mini-batch flush: ${flushedFrames.length} frames`);
+          } catch (e) {
+            console.warn('Mini-batch flush error:', e);
           }
         }
 
