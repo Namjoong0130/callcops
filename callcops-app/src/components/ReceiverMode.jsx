@@ -475,19 +475,9 @@ export default function ReceiverMode({ onBack }) {
             // Real-time Bank Identification
             if (rtResult.isValid) {
                 try {
-                    // Use aligned message if shift was needed
-                    let alignedProbs = runningProbs;
-                    if (rtResult.shift > 0) {
-                        const len = runningProbs.length;
-                        alignedProbs = new Float32Array(len);
-                        for (let i = 0; i < len; i++) {
-                            alignedProbs[i] = runningProbs[(i + rtResult.shift) % len];
-                        }
-                    }
-
                     let authKey = BigInt(0);
                     for (let i = 0; i < 64; i++) {
-                        const bitVal = alignedProbs[48 + i] > 0.5 ? 1n : 0n;
+                        const bitVal = runningProbs[48 + i] > 0.5 ? 1n : 0n;
                         authKey |= (bitVal << BigInt(63 - i));
                     }
                     const bank = getBankByKey(authKey);
@@ -604,22 +594,6 @@ export default function ReceiverMode({ onBack }) {
         // Final CRC Check (after correction)
         const crcResult = verifyCRC(usedProbs);
         console.log('Final CRC:', crcResult);
-
-        // If a shift was found during verification, align the usedProbs for display/usage
-        if (crcResult.shift > 0 && crcResult.syncValid) {
-            console.log(`Aligning message by shifting left ${crcResult.shift} bits`);
-            // We need to re-implement rotate or import it. Since rotateLeft isn't exported,
-            // we can implement a simple one here or just trust verifyCRC's internal check.
-            // But we need 'usedProbs' to be aligned for Bank extraction below.
-
-            const len = usedProbs.length;
-            const aligned = new Float32Array(len);
-            for (let i = 0; i < len; i++) {
-                aligned[i] = usedProbs[(i + crcResult.shift) % len];
-            }
-            usedProbs = aligned;
-            setBitProbs(usedProbs); // Update display with ALIGNED bits
-        }
 
         const crcPassed = crcResult.isValid;
 

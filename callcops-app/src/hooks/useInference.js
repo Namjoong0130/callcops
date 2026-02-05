@@ -231,15 +231,19 @@ export function useInference() {
             if (numFrames === 0) throw new Error('Audio too short');
 
             // Create tensor [1, 1, T] - Entire audio at once
-            // CRITICAL: Pass Float32Array directly, NOT Array.from() conversion
-            const inputTensor = new Tensor('float32', alignedAudio, [1, 1, alignedAudio.length]);
+            // Note: onnxruntime-react-native might require plain array or specific format
+            // Check if model supports dynamic axes. Assuming yes as Web does.
+            const audioArray = Array.from(alignedAudio); // Convert to plain array for RN
+            const inputTensor = new Tensor('float32', audioArray, [1, 1, alignedAudio.length]);
 
-            // Run inference with explicit input name matching model schema
-            const feeds = { audio: inputTensor };
+            // Run inference
+            const feeds = {};
+            feeds[session.inputNames[0]] = inputTensor;
             const results = await session.run(feeds);
 
-            // Get bit_probs output with explicit name (not dynamic outputNames[0])
-            const outputData = results.bit_probs.data; // Float32Array
+            // Get bit_probs output (Expected shape: [1, num_frames])
+            const outputName = session.outputNames[0];
+            const outputData = results[outputName].data; // Float32Array
 
             // Aggregate probabilities using CYCLIC method (like frontend)
             // Each frame probability maps to bitIdx = frameIndex % 128
@@ -298,9 +302,10 @@ export function useInference() {
             const numFrames = alignedAudio.length / FRAME_SAMPLES;
             if (numFrames === 0) throw new Error('Audio too short');
 
-            // Prepare tensors - CRITICAL: Use Float32Array directly, no Array.from()
+            // Prepare tensors
             // 1. Audio: [1, 1, T]
-            const audioTensor = new Tensor('float32', alignedAudio, [1, 1, alignedAudio.length]);
+            const audioArray = Array.from(alignedAudio);
+            const audioTensor = new Tensor('float32', audioArray, [1, 1, alignedAudio.length]);
 
             // 2. Message: [1, 128]
             const messageArray = new Float32Array(PAYLOAD_LENGTH);
@@ -309,16 +314,18 @@ export function useInference() {
             }
             const messageTensor = new Tensor('float32', messageArray, [1, PAYLOAD_LENGTH]);
 
-            // Run inference with explicit input names matching model schema
-            const feeds = {
-                audio: audioTensor,
-                message: messageTensor,
-            };
+            // Run inference
+            const feeds = {};
+            feeds[session.inputNames[0]] = audioTensor;
+            if (session.inputNames.length > 1) {
+                feeds[session.inputNames[1]] = messageTensor;
+            }
 
             const results = await session.run(feeds);
 
-            // Get encoded output with explicit name
-            const outputData = results.watermarked.data; // Float32Array
+            // Get encoded output
+            const outputName = session.outputNames[0];
+            const outputData = results[outputName].data; // Float32Array
 
             const encoded = new Float32Array(outputData);
             return { encoded };

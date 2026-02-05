@@ -114,100 +114,27 @@ export function createMessageWithCRC(dataBits) {
   return message;
 }
 
-// Expected Sync Pattern: 0xAAAA = 1010101010101010
-const SYNC_PATTERN = 0xAAAA;
-
 /**
- * Verify sync pattern (first 16 bits must be 10101010...)
+ * Verify message integrity using CRC
  * @param {Float32Array|number[]} message - 128-bit message
- * @returns {{ isValid: boolean, extractedSync: number }}
- */
-export function verifySyncPattern(message) {
-  let extractedSync = 0;
-
-  // Extract first 16 bits as a number
-  for (let i = 0; i < 16; i++) {
-    const bit = message[i] > 0.5 ? 1 : 0;
-    extractedSync |= (bit << (15 - i));
-  }
-
-  const isValid = extractedSync === SYNC_PATTERN;
-
-  return {
-    isValid,
-    extractedSync,
-    expectedSync: SYNC_PATTERN
-  };
-}
-
-/**
- * Rotate array to the left by n positions
- * @param {Float32Array|number[]} arr 
- * @param {number} n 
- * @returns {Float32Array}
- */
-function rotateLeft(arr, n) {
-  const result = new Float32Array(arr.length);
-  const len = arr.length;
-  for (let i = 0; i < len; i++) {
-    result[i] = arr[(i + n) % len];
-  }
-  return result;
-}
-
-/**
- * Attempt to align the message by rotating until Sync Pattern matches
- * @param {Float32Array|number[]} message - 128-bit message
- * @returns {{ alignedMessage: Float32Array, shift: number, found: boolean }}
- */
-export function alignBySyncPattern(message) {
-  const len = message.length;
-
-  // Try all possible 128 shifts
-  for (let shift = 0; shift < len; shift++) {
-    const rotated = rotateLeft(message, shift);
-    const { isValid } = verifySyncPattern(rotated);
-
-    if (isValid) {
-      return { alignedMessage: rotated, shift, found: true };
-    }
-  }
-
-  return { alignedMessage: message, shift: 0, found: false };
-}
-
-/**
- * Verify message integrity using CRC AND Sync Pattern
- * Automatically attempts to align the message if Sync Pattern is displaced.
- * @param {Float32Array|number[]} message - 128-bit message
- * @returns {{ isValid: boolean, expectedCRC: number, actualCRC: number, confidence: number, syncValid: boolean, shift?: number }}
+ * @returns {{ isValid: boolean, expectedCRC: number, actualCRC: number, confidence: number }}
  */
 export function verifyCRC(message) {
-  // 1. First, try to align based on Sync Pattern
-  const { alignedMessage, shift, found } = alignBySyncPattern(message);
+  const { crc: actualCRC } = extractCRC(message);
+  // Re-calculate expected CRC from the data portion of the received message
+  const expectedCRC = calculateCRC16(message);
 
-  // 2. Use the aligned message for CRC check
-  const { crc: actualCRC } = extractCRC(alignedMessage);
-  // Re-calculate expected CRC from the data portion
-  const expectedCRC = calculateCRC16(alignedMessage);
-
-  const crcValid = expectedCRC === actualCRC;
-
-  // If we found a sync pattern AND the CRC matches, it's a valid message!
-  const isValid = found && crcValid;
+  const isValid = expectedCRC === actualCRC;
 
   // Calculate average bit confidence
-  const confidences = Array.from(alignedMessage).map(b => Math.abs(b - 0.5) * 2);
+  const confidences = Array.from(message).map(b => Math.abs(b - 0.5) * 2);
   const avgConfidence = confidences.reduce((a, b) => a + b, 0) / confidences.length;
 
   return {
     isValid,
     expectedCRC,
     actualCRC,
-    confidence: avgConfidence,
-    syncValid: found,
-    extractedSync: found ? SYNC_PATTERN : 0, // Simplified for success case
-    shift // Return shift amount for debugging
+    confidence: avgConfidence
   };
 }
 
