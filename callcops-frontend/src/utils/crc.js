@@ -1,11 +1,19 @@
 /**
  * CRC Utilities for Message Verification
  * 
- * 128-bit payload structure:
- * - 112 bits: data (Sync 16 + Timestamp 32 + Auth 64)
- * - 16 bits: CRC-16 checksum
+ * ⚠️  LEGACY: Consider using reedSolomon.js for better error correction!
  * 
- * This allows robust error detection and single-bit correction.
+ * CRC-16 (this file):
+ * - 128-bit payload: 112 data + 16 CRC
+ * - Detection: up to 3 bits
+ * - Correction: 0 bits (brute-force 1-bit only)
+ * 
+ * Reed-Solomon (reedSolomon.js):
+ * - 128-bit payload: 96 data + 32 RS parity
+ * - Detection: up to 4 bytes
+ * - Correction: up to 2 bytes (16 bits) ANYWHERE
+ * 
+ * Use RS for production, CRC for backward compatibility.
  */
 
 // CRC-16-CCITT polynomial (x^16 + x^12 + x^5 + 1)

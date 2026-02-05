@@ -1,39 +1,34 @@
 /**
  * MessageInput Component
  * 
- * Input for 128-bit watermark message matching CallCops payload structure:
+ * Input for 128-bit watermark message matching CallCops payload structure with Reed-Solomon:
  * - [0-15]   Sync Pattern (16 bits) - Fixed: 1010101010101010
  * - [16-47]  Timestamp (32 bits) - Random/User input
- * - [48-111] Auth Data (64 bits) - User input
- * - [112-127] CRC Checksum (16 bits) - Auto-calculated
+ * - [48-95]  Auth Data (48 bits) - User input
+ * - [96-127] RS Parity (32 bits) - Auto-calculated (can correct up to 2 byte errors)
  */
 
 import { useState, useCallback, useEffect } from 'react';
-import { calculateCRC16 } from '../utils/crc';
+import { createMessageWithRS } from '../utils/reedSolomon';
 
 // Fixed sync pattern: 1010101010101010
 const SYNC_PATTERN = [1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0];
 
-// Bit field definitions
+// Bit field definitions (RS structure)
 const SYNC_BITS = 16;
 const TIMESTAMP_BITS = 32;
-const AUTH_BITS = 64;
-const CRC_BITS = 16;
+const AUTH_BITS = 48;  // Reduced from 64 to make room for RS parity
+const RS_PARITY_BITS = 32;  // RS(16,12) parity for 2-byte error correction
 
 export function MessageInput({ message, onChange, disabled = false }) {
   // Store raw hex strings for display (allowing partial input)
   const [timestampHex, setTimestampHex] = useState('');
   const [authHex, setAuthHex] = useState('');
 
-  // Compute CRC-16 using standard utility
-  const computeCRC = useCallback((data) => {
-    const crc = calculateCRC16(data);
-    // Convert 16-bit number to bit array
-    const bits = [];
-    for (let i = 15; i >= 0; i--) {
-      bits.push((crc >> i) & 1);
-    }
-    return bits;
+  // Create full message with RS parity (using high-level API)
+  const createFullMessage = useCallback((dataBits) => {
+    // dataBits should be 96 bits: Sync(16) + Time(32) + Auth(48)
+    return createMessageWithRS(dataBits);
   }, []);
 
   // Convert hex string to bits (pad with zeros on right if needed)
@@ -65,7 +60,7 @@ export function MessageInput({ message, onChange, disabled = false }) {
     return hex;
   }, []);
 
-  // Build full 128-bit message from hex strings
+  // Build full 128-bit message from hex strings with RS parity
   const buildMessage = useCallback(() => {
     // Both fields must have at least some input
     if (!timestampHex && !authHex) return null;
@@ -73,11 +68,11 @@ export function MessageInput({ message, onChange, disabled = false }) {
     const sync = [...SYNC_PATTERN];
     const timestamp = hexToBits(timestampHex, TIMESTAMP_BITS);
     const auth = hexToBits(authHex, AUTH_BITS);
-    const crc = computeCRC([...sync, ...timestamp, ...auth]);
-    const fullMessage = [...sync, ...timestamp, ...auth, ...crc];
-
-    return new Float32Array(fullMessage);
-  }, [timestampHex, authHex, hexToBits, computeCRC]);
+    const dataBits = [...sync, ...timestamp, ...auth]; // 96 bits
+    
+    // Use RS to create full 128-bit message with parity
+    return createFullMessage(dataBits);
+  }, [timestampHex, authHex, hexToBits, createFullMessage]);
 
   // Update parent when hex strings change
   useEffect(() => {
@@ -96,7 +91,7 @@ export function MessageInput({ message, onChange, disabled = false }) {
   // Handle auth data input change
   const handleAuthChange = useCallback((e) => {
     const value = e.target.value.replace(/[^0-9A-Fa-f]/g, '').toUpperCase();
-    setAuthHex(value.slice(0, 16)); // Max 16 hex chars = 64 bits
+    setAuthHex(value.slice(0, 12)); // Max 12 hex chars = 48 bits
   }, []);
 
   // Generate random timestamp
@@ -117,18 +112,29 @@ export function MessageInput({ message, onChange, disabled = false }) {
     generateRandomAuth();
   }, [generateRandomTimestamp, generateRandomAuth]);
 
-  // Calculate CRC for display (based on current input)
-  const displayCRC = (timestampHex || authHex)
-    ? bitsToHex(computeCRC([
-      ...SYNC_PATTERN,
-      ...hexToBits(timestampHex, TIMESTAMP_BITS),
-      ...hexToBits(authHex, AUTH_BITS)
-    ]))
-    : '----';
+  // Calculate RS parity for display (based on current input)
+  const displayRS = (timestampHex || authHex)
+    ? (() => {
+        const sync = [...SYNC_PATTERN];
+        const timestamp = hexToBits(timestampHex, TIMESTAMP_BITS);
+        const auth = hexToBits(authHex, AUTH_BITS);
+        const dataBits = [...sync, ...timestamp, ...auth];
+        const fullMsg = createFullMessage(dataBits);
+        // RS parity is the last 32 bits (4 bytes)
+        const parityBits = Array.from(fullMsg.slice(96, 128));
+        // Convert to hex
+        let hex = '';
+        for (let i = 0; i < 32; i += 4) {
+          const nibble = parityBits[i] * 8 + parityBits[i+1] * 4 + parityBits[i+2] * 2 + parityBits[i+3];
+          hex += nibble.toString(16).toUpperCase();
+        }
+        return hex;
+      })()
+    : '--------';
 
   // Display filled timestamp/auth for visual feedback
   const displayTimestamp = timestampHex.padEnd(8, '·');
-  const displayAuth = authHex.padEnd(16, '·');
+  const displayAuth = authHex.padEnd(12, '·');  // 12 hex chars for 48 bits
 
   return (
     <div className="space-y-4">
@@ -175,10 +181,10 @@ export function MessageInput({ message, onChange, disabled = false }) {
         </div>
       </div>
 
-      {/* Auth Data (64 bits) */}
+      {/* Auth Data (48 bits) */}
       <div className="bg-surface/50 rounded-lg p-3 border border-gray-700/50">
         <div className="flex items-center justify-between mb-2">
-          <span className="text-xs font-medium text-gray-400">Auth Data (64 bits)</span>
+          <span className="text-xs font-medium text-gray-400">Auth Data (48 bits)</span>
           <button
             onClick={generateRandomAuth}
             disabled={disabled}
@@ -194,27 +200,27 @@ export function MessageInput({ message, onChange, disabled = false }) {
             value={authHex}
             onChange={handleAuthChange}
             disabled={disabled}
-            placeholder="Enter 16 hex chars..."
-            maxLength={16}
+            placeholder="Enter 12 hex chars..."
+            maxLength={12}
             className="w-full bg-transparent font-mono text-sm text-gray-200 tracking-wider
                      placeholder:text-gray-600 outline-none
                      disabled:opacity-50 disabled:cursor-not-allowed"
           />
           {/* Character count indicator */}
           <span className="absolute right-0 top-0 text-xs text-gray-500">
-            {authHex.length}/16
+            {authHex.length}/12
           </span>
         </div>
       </div>
 
-      {/* CRC Checksum (Auto-calculated) */}
+      {/* RS Parity (Auto-calculated) */}
       <div className="bg-surface/50 rounded-lg p-3 border border-gray-700/50">
         <div className="flex items-center justify-between mb-2">
-          <span className="text-xs font-medium text-gray-400">CRC Checksum (16 bits)</span>
-          <span className="text-xs text-blue-400">Auto</span>
+          <span className="text-xs font-medium text-gray-400">RS Parity (32 bits)</span>
+          <span className="text-xs text-blue-400">Auto · 2-byte ECC</span>
         </div>
         <div className="font-mono text-sm text-blue-400 tracking-wider">
-          {displayCRC}
+          {displayRS}
         </div>
       </div>
 
@@ -234,7 +240,7 @@ export function MessageInput({ message, onChange, disabled = false }) {
 
       {/* Payload Structure Info */}
       <div className="text-xs text-gray-500 text-center">
-        Total: 128 bits = Sync(16) + Timestamp(32) + Auth(64) + CRC(16)
+        Total: 128 bits = Sync(16) + Timestamp(32) + Auth(48) + RS(32)
       </div>
     </div>
   );

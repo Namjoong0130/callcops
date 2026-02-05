@@ -56,40 +56,59 @@ model:
 # 학습 설정
 training:
   batch_size: 24
-  learning_rate: 0.0001             # 1e-4 (초기 학습)
+  learning_rate: 0.0001             # 1e-4 (peak LR, warmup 후 도달)
+  warmup_start_lr: 0.000001         # 1e-6 (warmup 시작 LR)
   num_workers: 4
   adam_betas: [0.5, 0.9]
-  lr_scheduler: "cosine"
-  warmup_epochs: 5
+  lr_scheduler: "cosine"            # warmup → cosine decay
+  warmup_epochs: 5                  # 5 에포크 동안 1e-6 → 1e-4 선형 증가
   epochs: 100
-  grad_clip: 1.0
+  grad_clip: 0.5                    # 0.5 (gradient explosion 방지)
   use_amp: true                     # Mixed Precision (BF16)
-  
+
   # ═══════════════════════════════════════════════════
-  # 손실 함수 가중치 (Lambda Values)
+  # 손실 함수 가중치 (Balanced Strategy for Causal)
   # ═══════════════════════════════════════════════════
-  # 전략: Audio-Priority (SNR 우선, BER은 BCH 허용 범위 내에서 관리)
+  # 전략: Causal 모델은 receptive field가 제한적이므로
+  #        비트 삽입 학습에 충분한 gradient가 필요함.
+  #        기존 SNR-First(lambda_bit=0.1)는 비트 학습 불가.
   #
-  # lambda_bit:   2.0   — 비트 임베딩 압박 완화
-  # lambda_audio: 50.0  — Mel Loss (지각적 품질)
-  # lambda_stft:  10.0  — 스펙트럼 보존
-  # lambda_l1:    10.0  — Waveform 직접 보존
-  # lambda_adv:   0.05  — GAN 안정성
-  # lambda_det:   0.1   — Detection 정확도
+  # lambda_bit:   2.0   — 비트 정확도 확보 (기존 0.1 → 20배 상향)
+  # lambda_audio: 50.0  — Mel Loss (지각적 품질, 과도한 500→50 완화)
+  # lambda_stft:  10.0  — 스펙트럼 보존 (적정 수준)
+  # lambda_l1:    30.0  — Waveform SNR (과도한 500→30 완화)
+  # lambda_adv:   0.1   — GAN 안정성
+  # lambda_det:   0.5   — Detection 정확도 (causal 특성 보상)
   # ═══════════════════════════════════════════════════
-  lambda_bit: 2.0                   # BCE loss for bit accuracy
-  lambda_audio: 50.0                # Mel Loss (perceptual quality)
+  lambda_bit: 2.0                   # BCE loss — 비트 학습의 핵심
+  lambda_audio: 50.0                # Mel Loss (지각적 품질)
   lambda_stft: 10.0                 # Multi-resolution STFT loss
-  lambda_l1: 10.0                   # L1 waveform loss → SNR
-  lambda_adv: 0.05                  # Adversarial loss (GAN)
-  lambda_det: 0.1                   # Detection accuracy
-  
+  lambda_l1: 30.0                   # L1 waveform loss → SNR
+  lambda_adv: 0.1                   # Adversarial loss (GAN)
+  lambda_det: 0.5                   # Detection accuracy
+
   # SNR 목표
   target_snr_db: 25.0               # 최소 25dB SNR 목표
-  
+
   # Encoder Alpha (perturbation scale)
-  encoder_alpha: 0.25               # 물리적 강도 제한
-  
+  # Causal 모델은 past-only context로 정보량이 제한적이므로
+  # non-causal(0.25) 대비 더 강한 섭동이 필요
+  encoder_alpha: 0.35               # 물리적 강도 (causal 보상)
+
+  # ═══════════════════════════════════════════════════
+  # Dynamic Weight Controller (Balanced)
+  # ═══════════════════════════════════════════════════
+  # SNR이 극도로 낮을 때만 비트 학습을 억제.
+  # 기존 15/20dB 기준은 너무 보수적 — 비트 학습 기회를 과도하게 차단함.
+  # SNR < 10dB: lambda_bit → 0 (심각한 품질 저하 시에만)
+  # 10dB ≤ SNR < 15dB: lambda_bit 선형 복원
+  # SNR ≥ 15dB: lambda_bit = config 값 (정상 학습)
+  dynamic_weight_controller:
+    enabled: true
+    snr_critical: 10.0              # 이 미만이면 lambda_bit = 0
+    snr_target: 15.0                # 이 이상이면 lambda_bit 완전 복원
+    bit_warmup_epochs: 10           # 초기 N 에포크는 무조건 lambda_bit 활성화
+
   # Early stopping
   early_stopping:
     enabled: true

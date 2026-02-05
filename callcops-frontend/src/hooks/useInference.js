@@ -16,8 +16,17 @@ import { StreamingEncoderWrapper } from '../utils/StreamingEncoderWrapper';
 // Configure ONNX Runtime Web
 ort.env.wasm.wasmPaths = 'https://cdn.jsdelivr.net/npm/onnxruntime-web/dist/';
 
-const DECODER_MODEL_PATH = '/models/decoder.onnx';
-const ENCODER_MODEL_PATH = '/models/encoder.onnx';
+// 모델 경로 맵 (FP32 / INT8)
+const MODEL_PATHS = {
+  fp32: {
+    decoder: '/models/decoder.onnx',
+    encoder: '/models/encoder.onnx',
+  },
+  int8: {
+    decoder: '/models/decoder_int8.onnx',
+    encoder: '/models/encoder_int8.onnx',
+  },
+};
 
 // Frame-Wise Constants (match Python model)
 const FRAME_SAMPLES = 320;      // 40ms @ 8kHz
@@ -32,9 +41,53 @@ export function useInference() {
   const [frameProbs, setFrameProbs] = useState(null);  // [num_frames] 프레임별 확률
   const [bitProbs, setBitProbs] = useState(null);      // [128] 복원된 128비트
   const [lastInferenceTime, setLastInferenceTime] = useState(0);
+  const [modelPrecision, setModelPrecisionState] = useState('fp32'); // 'fp32' | 'int8'
 
   const decoderSessionRef = useRef(null);
   const encoderSessionRef = useRef(null);
+  const currentPrecisionRef = useRef('fp32');
+
+  /**
+   * 모델 정밀도 전환 (FP32 ↔ INT8)
+   * 기존 세션을 해제하고 다음 로드 시 새 정밀도 모델을 사용.
+   */
+  const setModelPrecision = useCallback(async (precision) => {
+    if (precision !== 'fp32' && precision !== 'int8') return;
+    if (precision === currentPrecisionRef.current) return;
+
+    console.log(`Switching model precision: ${currentPrecisionRef.current} → ${precision}`);
+
+    // 기존 세션 해제
+    if (decoderSessionRef.current) {
+      decoderSessionRef.current.release();
+      decoderSessionRef.current = null;
+    }
+    if (encoderSessionRef.current) {
+      encoderSessionRef.current.release();
+      encoderSessionRef.current = null;
+    }
+
+    currentPrecisionRef.current = precision;
+    setModelPrecisionState(precision);
+    setIsReady(false);
+
+    // Decoder 즉시 재로드
+    try {
+      setIsLoading(true);
+      const paths = MODEL_PATHS[precision];
+      const session = await ort.InferenceSession.create(paths.decoder, {
+        executionProviders: ['webgpu', 'webgl', 'wasm'],
+        graphOptimizationLevel: 'all',
+      });
+      decoderSessionRef.current = session;
+      setIsReady(true);
+      console.log(`Decoder (${precision}) loaded`);
+    } catch (err) {
+      setError(`Failed to load ${precision} decoder: ${err.message}`);
+    } finally {
+      setIsLoading(false);
+    }
+  }, []);
 
   /**
    * Load decoder model
@@ -42,15 +95,16 @@ export function useInference() {
   const loadDecoder = useCallback(async () => {
     if (decoderSessionRef.current) return decoderSessionRef.current;
 
+    const precision = currentPrecisionRef.current;
+    const modelPath = MODEL_PATHS[precision].decoder;
+
     try {
       setIsLoading(true);
       setError(null);
 
-      console.log('Loading decoder model (Frame-Wise v2.0)...');
+      console.log(`Loading decoder model (${precision})...`);
 
-      // Try GPU-accelerated backends first, fall back to WASM
-      // WebGPU > WebGL > WASM (performance order)
-      const session = await ort.InferenceSession.create(DECODER_MODEL_PATH, {
+      const session = await ort.InferenceSession.create(modelPath, {
         executionProviders: ['webgpu', 'webgl', 'wasm'],
         graphOptimizationLevel: 'all',
       });
@@ -59,11 +113,11 @@ export function useInference() {
 
       decoderSessionRef.current = session;
       setIsReady(true);
-      console.log('Decoder model loaded successfully');
+      console.log(`Decoder (${precision}) loaded: ${modelPath}`);
 
       return session;
     } catch (err) {
-      const errorMsg = `Failed to load decoder: ${err.message}`;
+      const errorMsg = `Failed to load decoder (${precision}): ${err.message}`;
       console.error(errorMsg);
       setError(errorMsg);
       throw err;
@@ -78,15 +132,16 @@ export function useInference() {
   const loadEncoder = useCallback(async () => {
     if (encoderSessionRef.current) return encoderSessionRef.current;
 
+    const precision = currentPrecisionRef.current;
+    const modelPath = MODEL_PATHS[precision].encoder;
+
     try {
       setIsLoading(true);
       setError(null);
 
-      console.log('Loading encoder model (Frame-Wise v2.0)...');
+      console.log(`Loading encoder model (${precision})...`);
 
-      // Try GPU-accelerated backends first, fall back to WASM
-      // WebGPU > WebGL > WASM (performance order)
-      const session = await ort.InferenceSession.create(ENCODER_MODEL_PATH, {
+      const session = await ort.InferenceSession.create(modelPath, {
         executionProviders: ['webgpu', 'webgl', 'wasm'],
         graphOptimizationLevel: 'all',
       });
@@ -94,11 +149,11 @@ export function useInference() {
       console.log('Encoder using backend:', session.handler?._ep?.name || 'unknown');
 
       encoderSessionRef.current = session;
-      console.log('Encoder model loaded successfully');
+      console.log(`Encoder (${precision}) loaded: ${modelPath}`);
 
       return session;
     } catch (err) {
-      const errorMsg = `Failed to load encoder: ${err.message}`;
+      const errorMsg = `Failed to load encoder (${precision}): ${err.message}`;
       console.error(errorMsg);
       setError(errorMsg);
       throw err;
@@ -399,10 +454,14 @@ export function useInference() {
     frameProbs,      // NEW: Frame-wise probabilities
     bitProbs,        // Aggregated 128-bit payload
     lastInferenceTime,
+    modelPrecision,  // 현재 정밀도 ('fp32' | 'int8')
 
-    // Model names (extracted from paths)
-    decoderModelName: DECODER_MODEL_PATH.split('/').pop(),
-    encoderModelName: ENCODER_MODEL_PATH.split('/').pop(),
+    // Model names (현재 정밀도 반영)
+    decoderModelName: MODEL_PATHS[modelPrecision].decoder.split('/').pop(),
+    encoderModelName: MODEL_PATHS[modelPrecision].encoder.split('/').pop(),
+
+    // 정밀도 전환
+    setModelPrecision,
 
     // Core functions
     loadDecoder,

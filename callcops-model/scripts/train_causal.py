@@ -16,6 +16,7 @@ Usage:
 
 import os
 import sys
+import math
 import argparse
 import traceback
 import shutil
@@ -462,6 +463,14 @@ def train_causal(
         print(f"  Discriminator: {params['discriminator']:,}")
         print(f"  Total: {params['total']:,}")
 
+        # Config-driven Alpha Override
+        encoder_alpha = training_config.get('encoder_alpha', None)
+        if encoder_alpha is not None:
+            old_alpha = model.encoder.alpha.item()
+            model.encoder.alpha.fill_(encoder_alpha)
+            model.encoder.alpha_min = encoder_alpha
+            print(f"  Encoder Alpha Override: {old_alpha:.3f} -> {encoder_alpha:.3f}")
+
         # ========================================
         # 2. Loss Function
         # ========================================
@@ -476,19 +485,35 @@ def train_causal(
         ).to(device)
 
         # ========================================
-        # 3. Optimizers
+        # 3. Optimizers + LR Warmup + Cosine Decay
         # ========================================
-        lr = training_config.get('learning_rate', 2e-4)
+        peak_lr = training_config.get('learning_rate', 2e-4)
+        warmup_start_lr = training_config.get('warmup_start_lr', 1e-6)
+        warmup_epochs = training_config.get('warmup_epochs', 5)
+        num_epochs = training_config.get('epochs', 100)
         betas = tuple(training_config.get('adam_betas', [0.5, 0.9]))
 
+        # Start at warmup_start_lr, ramp to peak_lr over warmup_epochs
         opt_g = optim.Adam(
             list(model.encoder.parameters()) + list(model.decoder.parameters()),
-            lr=lr, betas=betas
+            lr=warmup_start_lr, betas=betas
         )
-        opt_d = optim.Adam(model.discriminator.parameters(), lr=lr, betas=betas)
+        opt_d = optim.Adam(model.discriminator.parameters(), lr=warmup_start_lr, betas=betas)
 
-        scheduler_g = optim.lr_scheduler.ReduceLROnPlateau(opt_g, mode='min', factor=0.5, patience=3, min_lr=1e-7)
-        scheduler_d = optim.lr_scheduler.ReduceLROnPlateau(opt_d, mode='min', factor=0.5, patience=3, min_lr=1e-7)
+        # Linear warmup → Cosine annealing
+        def lr_lambda(epoch):
+            if epoch < warmup_epochs:
+                # Linear warmup: warmup_start_lr → peak_lr
+                return (peak_lr / warmup_start_lr - 1.0) * (epoch / warmup_epochs) + 1.0
+            else:
+                # Cosine decay: peak_lr → min_lr
+                progress = (epoch - warmup_epochs) / max(num_epochs - warmup_epochs, 1)
+                return (peak_lr / warmup_start_lr) * (0.5 * (1.0 + math.cos(math.pi * progress)))
+
+        scheduler_g = optim.lr_scheduler.LambdaLR(opt_g, lr_lambda)
+        scheduler_d = optim.lr_scheduler.LambdaLR(opt_d, lr_lambda)
+
+        print(f"\n  LR Schedule: warmup {warmup_start_lr:.1e} → {peak_lr:.1e} over {warmup_epochs} epochs, then cosine decay")
 
         # ========================================
         # 4. Trainer
@@ -505,12 +530,31 @@ def train_causal(
         )
 
         if resume_path and resume_path.exists():
-            trainer.load_checkpoint(resume_path, new_lr=lr)
+            trainer.load_checkpoint(resume_path, new_lr=warmup_start_lr)
+            # 체크포인트 로드 후 Alpha 재강제 (체크포인트가 이전 alpha를 복원할 수 있음)
+            if encoder_alpha is not None:
+                model.encoder.alpha.fill_(encoder_alpha)
+                model.encoder.alpha_min = encoder_alpha
+                print(f"  Post-Checkpoint Alpha Re-enforced: {encoder_alpha:.3f}")
 
         # ========================================
-        # 5. Training Loop
+        # 5. Dynamic Weight Controller
         # ========================================
-        num_epochs = training_config.get('epochs', 100)
+        dwc_config = training_config.get('dynamic_weight_controller', {})
+        dwc_enabled = dwc_config.get('enabled', False)
+        dwc_snr_critical = dwc_config.get('snr_critical', 15.0)
+        dwc_snr_target = dwc_config.get('snr_target', 20.0)
+        bit_warmup_epochs = dwc_config.get('bit_warmup_epochs', 10)  # 초기 N 에포크는 bit 학습 우선
+        base_lambda_bit = training_config.get('lambda_bit', 0.1)
+
+        if dwc_enabled:
+            print(f"  DWC: Bit Warmup={bit_warmup_epochs} epochs (무조건 lambda_bit 활성화)")
+            print(f"  DWC: 이후 SNR < {dwc_snr_critical}dB → lambda_bit=0, "
+                  f"SNR >= {dwc_snr_target}dB → lambda_bit={base_lambda_bit}")
+
+        # ========================================
+        # 6. Training Loop
+        # ========================================
         save_dir.mkdir(parents=True, exist_ok=True)
         best_val_snr = 0.0
 
@@ -520,28 +564,55 @@ def train_causal(
 
             # Streaming validation (causal-specific)
             streaming_result = trainer.validate_streaming()
-            
+
             trainer.history['train_loss'].append(train_metrics['loss_total'])
             trainer.history['val_loss'].append(val_metrics['loss'])
             trainer.history['train_ber'].append(train_metrics['ber'])
             trainer.history['val_ber'].append(val_metrics['ber'])
 
-            scheduler_g.step(val_metrics['loss'])
-            scheduler_d.step(val_metrics['loss'])
+            # LR scheduler step (epoch-based, no args for LambdaLR)
+            scheduler_g.step()
+            scheduler_d.step()
             current_lr = opt_g.param_groups[0]['lr']
 
+            # Dynamic Weight Controller: adjust lambda_bit based on SNR
+            if dwc_enabled:
+                val_snr = val_metrics['snr']
+                
+                # Bit Warmup: 초기 N 에포크는 무조건 lambda_bit 활성화 (bit 학습 우선)
+                if epoch < bit_warmup_epochs:
+                    effective_lambda_bit = base_lambda_bit
+                    print(f"  [DWC] Warmup {epoch+1}/{bit_warmup_epochs}: lambda_bit={effective_lambda_bit:.4f} (고정)")
+                elif val_snr < dwc_snr_critical:
+                    # SNR critical: disable bit loss entirely
+                    effective_lambda_bit = 0.0
+                    print(f"  [DWC] SNR={val_snr:.1f}dB < {dwc_snr_critical}dB → lambda_bit=0 (SNR 우선)")
+                elif val_snr < dwc_snr_target:
+                    # Linear ramp: 0 → base_lambda_bit as SNR goes from critical → target
+                    ratio = (val_snr - dwc_snr_critical) / (dwc_snr_target - dwc_snr_critical)
+                    effective_lambda_bit = base_lambda_bit * ratio
+                    print(f"  [DWC] SNR={val_snr:.1f}dB → lambda_bit={effective_lambda_bit:.4f} (램프)")
+                else:
+                    # SNR healthy: full bit loss
+                    effective_lambda_bit = base_lambda_bit
+                    print(f"  [DWC] SNR={val_snr:.1f}dB >= {dwc_snr_target}dB → lambda_bit={effective_lambda_bit:.4f}")
+
+                loss_fn.lambda_bit = effective_lambda_bit
+
             # Summary
-            streaming_status = "✅ PASS" if streaming_result['passed'] else f"❌ FAIL (diff={streaming_result['max_diff']:.2e})"
-            
+            streaming_status = "PASS" if streaming_result['passed'] else f"FAIL (diff={streaming_result['max_diff']:.2e})"
+
             summary = (
-                f"✅ **Epoch {epoch+1}/{num_epochs}** (CAUSAL)\n"
-                f"📉 Val Loss: `{val_metrics['loss']:.4f}`\n"
-                f"🎯 Val BER: `{val_metrics['ber']:.4f}`\n"
-                f"🔊 Val SNR: `{val_metrics['snr']:.1f}dB`\n"
-                f"🔄 Streaming: {streaming_status}\n"
-                f"📊 LR: `{current_lr:.2e}`"
+                f"Epoch {epoch+1}/{num_epochs} (CAUSAL)\n"
+                f"  Val Loss: {val_metrics['loss']:.4f}\n"
+                f"  Val BER: {val_metrics['ber']:.4f}\n"
+                f"  Val SNR: {val_metrics['snr']:.1f}dB\n"
+                f"  Streaming: {streaming_status}\n"
+                f"  LR: {current_lr:.2e}"
             )
-            print(f"\n{summary.replace('**', '').replace('`', '')}")
+            if dwc_enabled:
+                summary += f"\n  lambda_bit: {loss_fn.lambda_bit:.4f}"
+            print(f"\n{summary}")
 
             if messenger:
                 messenger.send_message(summary)
@@ -555,12 +626,12 @@ def train_causal(
             if val_metrics['ber'] < trainer.best_ber:
                 trainer.best_ber = val_metrics['ber']
                 trainer.save_checkpoint(save_dir / "causal_best_ber.pth", val_metrics, config)
-                print(f"  ★ New best BER: {trainer.best_ber:.4f}")
+                print(f"  * New best BER: {trainer.best_ber:.4f}")
 
             if val_metrics['snr'] > best_val_snr:
                 best_val_snr = val_metrics['snr']
                 trainer.save_checkpoint(save_dir / "causal_best_snr.pth", val_metrics, config)
-                print(f"  ★ New best SNR: {best_val_snr:.1f}dB")
+                print(f"  * New best SNR: {best_val_snr:.1f}dB")
 
         # Final
         trainer.save_checkpoint(save_dir / "causal_final.pth", val_metrics, config)
