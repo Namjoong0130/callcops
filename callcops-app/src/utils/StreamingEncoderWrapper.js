@@ -134,17 +134,16 @@ export class StreamingEncoderWrapper {
     const audioTensor = new this._Tensor('float32', inputAudio, [1, 1, totalInputSamples]);
     const messageTensor = new this._Tensor('float32', rotatedMessage, [1, PAYLOAD_LENGTH]);
 
-    // 4. Run ONNX inference
-    const inputNames = this._session.inputNames;
-    const feeds = {};
-    feeds[inputNames[0]] = audioTensor;
-    feeds[inputNames[1]] = messageTensor;
+    // 4. Run ONNX inference with explicit input names matching model schema
+    const feeds = {
+      audio: audioTensor,
+      message: messageTensor,
+    };
 
     const results = await this._session.run(feeds);
 
-    // 5. Extract watermarked frames from output (skip history portion)
-    const outputName = this._session.outputNames[0];
-    const resultData = new Float32Array(results[outputName].data);
+    // 5. Extract watermarked frames from output with explicit name
+    const resultData = new Float32Array(results.watermarked.data);
 
     for (let i = 0; i < framesToProcess; i++) {
       const srcStart = HISTORY_SAMPLES + (i * FRAME_SAMPLES);
