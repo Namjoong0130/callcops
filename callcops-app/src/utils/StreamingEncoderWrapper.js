@@ -16,12 +16,13 @@ const FRAME_SAMPLES = 320;       // 40ms @ 8kHz
 const PAYLOAD_LENGTH = 128;      // 128-bit cyclic payload
 
 // Mini-batch configuration for improved quality
-const BATCH_FRAMES = 8;          // 8 frames = 320ms per batch
-const HISTORY_FRAMES = 4;        // 4 frames of history = 160ms context
+// Larger batches = better quality but more latency
+const BATCH_FRAMES = 32;         // 32 frames = 1.28s per batch (~8 ONNX calls/10s)
+const HISTORY_FRAMES = 8;        // 8 frames of history = 320ms context
 
-const BATCH_SAMPLES = BATCH_FRAMES * FRAME_SAMPLES;      // 2,560 samples
-const HISTORY_SAMPLES = HISTORY_FRAMES * FRAME_SAMPLES;  // 1,280 samples
-const TOTAL_SAMPLES = HISTORY_SAMPLES + BATCH_SAMPLES;   // 3,840 samples
+const BATCH_SAMPLES = BATCH_FRAMES * FRAME_SAMPLES;      // 10,240 samples
+const HISTORY_SAMPLES = HISTORY_FRAMES * FRAME_SAMPLES;  // 2,560 samples
+const TOTAL_SAMPLES = HISTORY_SAMPLES + BATCH_SAMPLES;   // 12,800 samples
 
 export class StreamingEncoderWrapper {
   /**
