@@ -231,19 +231,21 @@ export function useInference() {
             if (numFrames === 0) throw new Error('Audio too short');
 
             // Create tensor [1, 1, T] - Entire audio at once
-            // Note: onnxruntime-react-native might require plain array or specific format
-            // Check if model supports dynamic axes. Assuming yes as Web does.
-            const audioArray = Array.from(alignedAudio); // Convert to plain array for RN
-            const inputTensor = new Tensor('float32', audioArray, [1, 1, alignedAudio.length]);
+            // CRITICAL: Pass Float32Array directly, NOT Array.from() conversion
+            const inputTensor = new Tensor('float32', alignedAudio, [1, 1, alignedAudio.length]);
 
-            // Run inference
-            const feeds = {};
-            feeds[session.inputNames[0]] = inputTensor;
+            // Run inference with explicit input name matching model schema
+            const feeds = { audio: inputTensor };
             const results = await session.run(feeds);
 
-            // Get bit_probs output (Expected shape: [1, num_frames])
-            const outputName = session.outputNames[0];
-            const outputData = results[outputName].data; // Float32Array
+            // Get bit_probs output with explicit name (not dynamic outputNames[0])
+            const outputData = results.bit_probs.data; // Float32Array
+
+            // DEBUG: Log raw decoder output for first few frames
+            console.log(`[DECODER DEBUG] numFrames: ${numFrames}, outputData.length: ${outputData.length}`);
+            console.log(`[DECODER DEBUG] rawProbs[0:8]: [${Array.from(outputData.slice(0, 8)).map(p => p.toFixed(3)).join(', ')}]`);
+            console.log(`[DECODER DEBUG] rawProbs[32:40]: [${Array.from(outputData.slice(32, 40)).map(p => p.toFixed(3)).join(', ')}]`);
+            console.log(`[DECODER DEBUG] rawProbs[64:72]: [${Array.from(outputData.slice(64, 72)).map(p => p.toFixed(3)).join(', ')}]`);
 
             // Aggregate probabilities using CYCLIC method (like frontend)
             // Each frame probability maps to bitIdx = frameIndex % 128
@@ -261,6 +263,11 @@ export function useInference() {
             for (let i = 0; i < PAYLOAD_LENGTH; i++) {
                 bits128[i] = bitCounts[i] > 0 ? bitAccumulators[i] / bitCounts[i] : 0.5;
             }
+
+            // DEBUG: Log aggregated bits
+            const binaryBits = Array.from(bits128.slice(0, 32)).map(p => p > 0.5 ? 1 : 0);
+            console.log(`[DECODER DEBUG] bits[0:32]: [${binaryBits.join('')}]`);
+            console.log(`[DECODER DEBUG] Expected sync pattern (0xAAAA): 1010101010101010`);
 
             // Calculate confidence
             const confidences = bits128.map(p => Math.abs(p - 0.5) * 2);
@@ -302,10 +309,9 @@ export function useInference() {
             const numFrames = alignedAudio.length / FRAME_SAMPLES;
             if (numFrames === 0) throw new Error('Audio too short');
 
-            // Prepare tensors
+            // Prepare tensors - CRITICAL: Use Float32Array directly (no Array.from)
             // 1. Audio: [1, 1, T]
-            const audioArray = Array.from(alignedAudio);
-            const audioTensor = new Tensor('float32', audioArray, [1, 1, alignedAudio.length]);
+            const audioTensor = new Tensor('float32', alignedAudio, [1, 1, alignedAudio.length]);
 
             // 2. Message: [1, 128]
             const messageArray = new Float32Array(PAYLOAD_LENGTH);
@@ -314,18 +320,16 @@ export function useInference() {
             }
             const messageTensor = new Tensor('float32', messageArray, [1, PAYLOAD_LENGTH]);
 
-            // Run inference
-            const feeds = {};
-            feeds[session.inputNames[0]] = audioTensor;
-            if (session.inputNames.length > 1) {
-                feeds[session.inputNames[1]] = messageTensor;
-            }
+            // Run inference with explicit input names matching model schema
+            const feeds = {
+                audio: audioTensor,
+                message: messageTensor,
+            };
 
             const results = await session.run(feeds);
 
-            // Get encoded output
-            const outputName = session.outputNames[0];
-            const outputData = results[outputName].data; // Float32Array
+            // Get encoded output with explicit name
+            const outputData = results.watermarked.data; // Float32Array
 
             const encoded = new Float32Array(outputData);
             return { encoded };

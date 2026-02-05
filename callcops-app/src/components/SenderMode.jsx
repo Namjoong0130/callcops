@@ -1,10 +1,11 @@
 /**
- * SenderMode - Real-time audio watermark encoding
+ * SenderMode - Real-time audio watermark encoding with batch optimization
  *
- * Uses react-native-live-audio-stream to capture PCM data at 8kHz
- * and StreamingEncoderWrapper for frame-by-frame ONNX encoding.
+ * Uses react-native-live-audio-stream to capture PCM data at 8kHz.
+ * ONNX encoding is batched (32 frames = 1.28s per call) to minimize
+ * JS-to-Native bridge overhead and reduce ONNX calls from ~25/sec to ~0.8/sec.
  *
- * Timing: 40ms chunks (320 samples @ 8kHz) - matches frontend exactly.
+ * Timing: 40ms frames (320 samples @ 8kHz), batched to 1280ms (10,240 samples).
  */
 import React, { useState, useRef, useEffect } from 'react';
 import { View, Text, TouchableOpacity, StyleSheet, Alert, Platform, PermissionsAndroid } from 'react-native';
@@ -17,16 +18,17 @@ import * as Sharing from 'expo-sharing';
 import { useInference } from '../hooks/useInference';
 import { calculateCRC16 } from '../utils/crc';
 import { Buffer } from 'buffer';
-import {
-  StreamingEncoderWrapper,
-  FRAME_SAMPLES,
-  PAYLOAD_LENGTH
-} from '../utils/StreamingEncoderWrapper';
+import { FRAME_SAMPLES, PAYLOAD_LENGTH } from '../utils/StreamingEncoderWrapper';
 import { BANK_AUTH_KEYS, BANK_LIST, getBankById } from '../constants/bankAuthKeys';
 
 // Audio settings - Native 8kHz capture, NO resampling
 const SAMPLE_RATE = 8000;
 const WATERMARK_STRENGTH = 0.02;
+
+// Batch processing constants for ONNX optimization
+// 32 frames = 1.28 seconds per ONNX call (~0.8 calls/sec vs 25 calls/sec)
+const BATCH_FRAMES = 32;
+const BATCH_SAMPLES = BATCH_FRAMES * FRAME_SAMPLES; // 10,240 samples
 
 export default function SenderMode({ onBack }) {
   const [state, setState] = useState('idle');
@@ -51,14 +53,14 @@ export default function SenderMode({ onBack }) {
   const timerRef = useRef(null);
   const animationTimerRef = useRef(null); // For bit grid animation
 
-  // Streaming encoder wrapper (holds ONNX session + state)
-  const streamingEncoderRef = useRef(null);
+  // ONNX encoder session (direct reference for batch processing)
+  const encoderSessionRef = useRef(null);
 
   // Audio buffers - Use regular Arrays for push/splice, convert to Float32Array when needed
   const inputBufferRef = useRef([]);          // Accumulate incoming PCM (regular Array)
   const encodedBufferRef = useRef([]);        // All encoded samples (regular Array)
   const messageBitsRef = useRef(null);        // 128-bit message as Float32Array
-  const frameCountRef = useRef(0);            // For visualization throttling
+  const frameCountRef = useRef(0);            // Total frames processed (for bit alignment)
   const useOnnxRef = useRef(false);           // Track ONNX availability
   const processQueueRef = useRef(null);       // Expose processEncodingQueue for flushing
   const isProcessingRef = useRef(false);      // Global processing flag
@@ -165,6 +167,29 @@ export default function SenderMode({ onBack }) {
   };
 
   /**
+   * Rotate message bits for batch encoding alignment.
+   *
+   * The ONNX encoder assigns frame i (0-indexed) to bit i % 128.
+   * For a batch starting at globalFrameIndex, we need frame 0 to embed
+   * bit (globalFrameIndex % 128), frame 1 to embed bit ((globalFrameIndex + 1) % 128), etc.
+   *
+   * Solution: Rotate the message so that rotatedMessage[i] = originalMessage[(i + offset) % 128]
+   * where offset = globalFrameIndex % 128.
+   *
+   * @param {Float32Array} message - Original 128-bit message
+   * @param {number} startFrameIndex - Global frame index where this batch starts
+   * @returns {Float32Array} - Rotated message aligned for this batch
+   */
+  const rotateMessageForBatch = (message, startFrameIndex) => {
+    const offset = startFrameIndex % PAYLOAD_LENGTH;
+    const rotated = new Float32Array(PAYLOAD_LENGTH);
+    for (let i = 0; i < PAYLOAD_LENGTH; i++) {
+      rotated[i] = message[(i + offset) % PAYLOAD_LENGTH];
+    }
+    return rotated;
+  };
+
+  /**
    * Create WAV file from encoded samples
    */
   const createWavFile = async (samples) => {
@@ -222,7 +247,7 @@ export default function SenderMode({ onBack }) {
     inputBufferRef.current = [];
     encodedBufferRef.current = [];
     frameCountRef.current = 0;
-    streamingEncoderRef.current = null;
+    encoderSessionRef.current = null;
     useOnnxRef.current = false;
     setInputWaveform(new Array(30).fill(0));
     setOutputWaveform(new Array(30).fill(0));
@@ -248,17 +273,17 @@ export default function SenderMode({ onBack }) {
         playThroughEarpieceAndroid: false,
       });
 
-      // Initialize ONNX encoder if available
+      // Initialize ONNX encoder if available (for batch processing)
       if (inference.onnxAvailable) {
         try {
           const session = await inference.loadEncoder();
-          if (session && inference.Tensor) {
-            streamingEncoderRef.current = new StreamingEncoderWrapper(session, inference.Tensor);
+          if (session) {
+            encoderSessionRef.current = session;
             useOnnxRef.current = true;
             setUsedOnnx(true);
-            console.log('ONNX StreamingEncoderWrapper initialized');
+            console.log('ONNX Encoder ready for batch processing (32 frames/call)');
           } else {
-            console.warn('Missing session or Tensor class');
+            console.warn('Encoder session is null');
           }
         } catch (e) {
           console.warn('ONNX encoder failed to load, using fallback:', e);
@@ -289,60 +314,106 @@ export default function SenderMode({ onBack }) {
         bufferSize: FRAME_SAMPLES * 10, // 3200 samples = 400ms @ 8kHz (batch processing)
       });
 
-      // Non-blocking audio collection callback
-      // Key insight: Don't await ONNX inside the audio callback!
-      // Just collect samples quickly, process encoding separately
-
-      const processEncodingQueue = async () => {
+      // BATCH PROCESSING: Wait for 32 frames (10,240 samples) before ONNX call
+      // This reduces ONNX calls from ~25/sec to ~0.8/sec
+      const processEncodingQueue = async (forceFlush = false) => {
         if (isProcessingRef.current) return;
         isProcessingRef.current = true;
 
         try {
-          // Process all available frames
-          while (inputBufferRef.current.length >= FRAME_SAMPLES) {
-            const frameArray = inputBufferRef.current.splice(0, FRAME_SAMPLES);
-            const frame = new Float32Array(frameArray);
+          // Determine minimum samples needed (full batch or flush remaining)
+          const minSamples = forceFlush ? FRAME_SAMPLES : BATCH_SAMPLES;
 
-            let encodedFrame;
-            const bitIdx = frameCountRef.current % PAYLOAD_LENGTH;
+          while (inputBufferRef.current.length >= minSamples) {
+            // Extract batch (up to BATCH_SAMPLES, or all remaining if flushing)
+            const samplesToProcess = forceFlush
+              ? Math.min(inputBufferRef.current.length, BATCH_SAMPLES)
+              : BATCH_SAMPLES;
 
-            // Try ONNX encoding
-            if (useOnnxRef.current && streamingEncoderRef.current) {
+            // Align to frame boundary
+            const alignedSamples = Math.floor(samplesToProcess / FRAME_SAMPLES) * FRAME_SAMPLES;
+            if (alignedSamples === 0) break;
+
+            const batchArray = inputBufferRef.current.splice(0, alignedSamples);
+            const batchAudio = new Float32Array(batchArray);
+            const numFramesInBatch = alignedSamples / FRAME_SAMPLES;
+
+            // CRITICAL: Save the starting frame index for this batch BEFORE processing
+            // This is used for message rotation to ensure correct bit alignment
+            const batchStartFrameIndex = frameCountRef.current;
+
+            let encodedBatch = null;
+
+            // Try ONNX batch encoding
+            if (useOnnxRef.current && encoderSessionRef.current) {
               try {
-                encodedFrame = await streamingEncoderRef.current.processFrame(
-                  frame,
-                  messageBitsRef.current
+                // CRITICAL: Rotate message to align bits with global frame position
+                // Without this, the encoder always starts embedding from bit 0,
+                // causing decoder to fail finding the sync pattern
+                const rotatedMessage = rotateMessageForBatch(
+                  messageBitsRef.current,
+                  batchStartFrameIndex
                 );
+
+                // DEBUG: Verify rotation is working
+                const rotationOffset = batchStartFrameIndex % PAYLOAD_LENGTH;
+                console.log(`[ENCODER DEBUG] Batch #${Math.floor(batchStartFrameIndex / numFramesInBatch)}:`);
+                console.log(`  - batchStartFrameIndex: ${batchStartFrameIndex}`);
+                console.log(`  - numFramesInBatch: ${numFramesInBatch}`);
+                console.log(`  - rotationOffset: ${rotationOffset}`);
+                console.log(`  - original[0:4]: [${messageBitsRef.current.slice(0, 4).join(', ')}]`);
+                console.log(`  - rotated[0:4]: [${rotatedMessage.slice(0, 4).join(', ')}]`);
+                console.log(`  - expected rotated[0] = original[${rotationOffset}] = ${messageBitsRef.current[rotationOffset]}`);
+
+                const result = await inference.runEncoder(batchAudio, rotatedMessage);
+                encodedBatch = result.encoded;
               } catch (e) {
-                encodedFrame = null;
+                console.warn('ONNX batch encoding failed:', e.message);
+                encodedBatch = null;
               }
             }
 
-            // Fallback encoding if ONNX failed or unavailable
-            if (!encodedFrame) {
-              encodedFrame = embedWatermarkFallback(frame, frameCountRef.current, messageBitsRef.current);
+            // Fallback: process frame-by-frame if ONNX failed
+            // Note: fallback uses frameCountRef.current + f which is already correct
+            if (!encodedBatch) {
+              encodedBatch = new Float32Array(alignedSamples);
+              for (let f = 0; f < numFramesInBatch; f++) {
+                const frameStart = f * FRAME_SAMPLES;
+                const frame = batchAudio.subarray(frameStart, frameStart + FRAME_SAMPLES);
+                const encodedFrame = embedWatermarkFallback(
+                  frame,
+                  batchStartFrameIndex + f,  // Use batchStartFrameIndex for consistency
+                  messageBitsRef.current
+                );
+                encodedBatch.set(encodedFrame, frameStart);
+              }
             }
 
             // Accumulate encoded samples
-            for (let i = 0; i < encodedFrame.length; i++) {
-              encodedBufferRef.current.push(encodedFrame[i]);
+            for (let i = 0; i < encodedBatch.length; i++) {
+              encodedBufferRef.current.push(encodedBatch[i]);
             }
 
-            frameCountRef.current++;
+            // Update frame count
+            frameCountRef.current += numFramesInBatch;
 
-            // Update visualization (every 2 frames for faster movement)
-            if (frameCountRef.current % 2 === 0) {
-              setCurrentBitIndex(bitIdx);
-              let inputSum = 0, outputSum = 0;
-              for (let i = 0; i < frame.length; i++) {
-                inputSum += frame[i] * frame[i];
-                outputSum += encodedFrame[i] * encodedFrame[i];
-              }
-              const inputAmp = Math.sqrt(inputSum / frame.length);
-              const outputAmp = Math.sqrt(outputSum / encodedFrame.length);
-              setInputWaveform(prev => [...prev.slice(1), inputAmp * 5]);
-              setOutputWaveform(prev => [...prev.slice(1), outputAmp * 5]);
+            // Update visualization based on batch statistics
+            const bitIdx = (frameCountRef.current - 1) % PAYLOAD_LENGTH;
+            setCurrentBitIndex(bitIdx);
+
+            // Calculate RMS for visualization
+            let inputSum = 0, outputSum = 0;
+            for (let i = 0; i < batchAudio.length; i++) {
+              inputSum += batchAudio[i] * batchAudio[i];
+              outputSum += encodedBatch[i] * encodedBatch[i];
             }
+            const inputAmp = Math.sqrt(inputSum / batchAudio.length);
+            const outputAmp = Math.sqrt(outputSum / encodedBatch.length);
+            setInputWaveform(prev => [...prev.slice(1), inputAmp * 5]);
+            setOutputWaveform(prev => [...prev.slice(1), outputAmp * 5]);
+
+            // If flushing and not enough for another batch, exit
+            if (forceFlush && inputBufferRef.current.length < FRAME_SAMPLES) break;
           }
         } finally {
           isProcessingRef.current = false;
@@ -408,26 +479,22 @@ export default function SenderMode({ onBack }) {
       setState('encoding'); // Show encoding UI immediately
 
       if (processQueueRef.current) {
-        // Wait for any in-flight processing to finish
+        // Wait for any in-flight batch processing to finish
         while (isProcessingRef.current) {
           await new Promise(r => setTimeout(r, 50));
         }
 
-        // Keep processing until input buffer is empty
-        let flushCount = 0;
-        while (inputBufferRef.current.length >= FRAME_SAMPLES) {
-          isProcessingRef.current = false; // Reset flag to allow processing
-          await processQueueRef.current();
-          flushCount++;
-
-          // Update progress UI every 10 flush cycles
-          if (flushCount % 10 === 0) {
-            const remaining = Math.floor(inputBufferRef.current.length / FRAME_SAMPLES);
-            setStatusText(`Flushing... ${remaining} frames remaining`);
-          }
+        // Flush all remaining samples with forceFlush=true
+        // This processes any partial batch (<32 frames) in a single ONNX call
+        const remainingFrames = Math.floor(inputBufferRef.current.length / FRAME_SAMPLES);
+        if (remainingFrames > 0) {
+          console.log(`Flushing ${remainingFrames} remaining frames...`);
+          setStatusText(`Flushing ${remainingFrames} frames...`);
+          isProcessingRef.current = false;
+          await processQueueRef.current(true); // forceFlush = true
         }
 
-        console.log(`Flush complete after ${flushCount} cycles`);
+        console.log('Flush complete');
       }
 
       setState('encoding');
@@ -476,7 +543,7 @@ export default function SenderMode({ onBack }) {
     setBitProbs(null);
     setEncodedUri(null);
     setErrorMessage(null);
-    streamingEncoderRef.current = null;
+    encoderSessionRef.current = null;
   };
 
   // Render 16x8 bit matrix with time-based animation
