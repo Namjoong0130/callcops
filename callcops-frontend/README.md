@@ -8,8 +8,9 @@ Real-time audio watermarking demo using ONNX Runtime Web. This is a serverless, 
 - 📁 **File Upload**: Support for WAV, MP3, OGG, M4A, FLAC formats
 - 🔊 **Waveform Visualization**: Live audio waveform with bit zone overlay
 - 🔢 **Bit Matrix**: 8×16 grid showing 128-bit watermark detection
-- 📊 **Metrics Panel**: Confidence scores and detection statistics
-- ⚡ **On-Device Inference**: ONNX Runtime Web (WASM backend)
+- 📊 **Metrics Panel**: Confidence scores and RS error correction status
+- 🔒 **Reed-Solomon**: RS(16,12) error correction for robust detection
+- ⚡ **On-Device Inference**: ONNX Runtime Web (WASM/WebGL)
 
 ## Setup
 
@@ -87,10 +88,11 @@ Or manually push the `dist` folder to a `gh-pages` branch.
 | Property | Value |
 |----------|-------|
 | Sample Rate | 8kHz (telephony) |
-| Window Size | 400ms (3200 samples) |
-| Payload | 128 bits |
+| Streaming | Causal Mini-batch (32 frames) |
+| Payload | 128 bits (96 Data + 32 RS Parity) |
+| Error Correction | Reed-Solomon RS(16,12) |
 | Model | decoder_int8.onnx |
-| Backend | ONNX Runtime Web (WASM) |
+| Backend | ONNX Runtime Web (WASM/WebGL) |
 
 ## Model Input/Output
 

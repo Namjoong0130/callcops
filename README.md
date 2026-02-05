@@ -9,8 +9,8 @@ CallCops는 보이스피싱 방지 및 통화 무결성 인증을 위해 설계�
 ## 🚀 주요 기능 (Key Features)
 
 - **🎧 비가청 워터마킹 (Inaudible Watermarking)**: 통화 품질을 저해하지 않으면서(PESQ ≥ 4.0) 디지털 서명을 삽입합니다.
-- **⚡ 실시간 처리 (Real-time Processing)**: 200ms 미만의 초저지연설계로 실제 통화 중 실시간 탐지가 가능합니다.
-- **🛡️ 코덱 내성 (Codec Robustness)**: G.711/G.729 등 고압축 코덱을 거친 후에도 95% 이상의 검출률을 보장합니다.
+- **⚡ 실시간 처리 (Real-time Processing)**: Causal 신경망과 200ms 미만의 초저지연 설계로 실제 통화 중 실시간 탐지가 가능합니다.
+- **🛡️ 강력한 오류 정정 (Error Correction)**: Reed-Solomon RS(16,12) 코드를 탑재하여 심한 노이즈와 코덱 왜곡 환경에서도 데이터 무결성을 보장합니다.
 - **📱 온디바이스 AI (On-device AI)**: 서버 통신 없이 모바일/웹에서 직접 동작하는 경량화 모델(ONNX Runtime)을 탑재했습니다.
 - **🔄 랜덤 위치 탐지**: 워터마크가 반복 삽입되어 통화 도중 언제든 검증이 가능합니다.
 
@@ -23,8 +23,9 @@ CallCops는 보이스피싱 방지 및 통화 무결성 인증을 위해 설계�
 - **AI Inference**: ONNX Runtime Web (WASM/WebGL)
 
 ### **AI Model & Backend**
-- **Deep Learning**: PyTorch, Custom CNN/Attention Architecture
+- **Deep Learning**: PyTorch, Causal CNN/Attention Architecture
 - **Optimization**: Quantization (INT8), TorchScript, ONNX Export
+- **Error Correction**: Reed-Solomon (16, 12) over GF(2^8)
 - **Audio Codec**: G.711 / G.729 Simulator
 
 ## 👥 팀원 (Team Members)

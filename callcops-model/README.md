@@ -100,31 +100,31 @@ exported/onnx/
 
 ```
 ┌─────────────────────────────────────────────────────────────┐
-│                     CallCopsNet                             │
+│                     CallCopsNet (v2.1)                      │
 ├─────────────────────────────────────────────────────────────┤
 │                                                             │
 │   Audio [B,1,T] + Message [B,128]                          │
 │         │                                                   │
 │         ▼                                                   │
 │   ┌─────────────────────────────────────┐                  │
-│   │  Encoder                             │                  │
-│   │  ├─ CausalConv1d + SEBlock          │                  │
-│   │  ├─ CrossModalFusionBlock           │ ← Linear O(T)    │
-│   │  └─ Clamped Alpha [0.01, 0.3]       │ ← Mode Collapse 방지│
+│   │  Causal Encoder                      │                  │
+│   │  ├─ CausalConvBlock + SEBlock       │                  │
+│   │  ├─ FrameWiseFusionBlock            │ ← O(T) Streaming │
+│   │  └─ Mini-Batch (32) + History (8)   │ ← Quality Refine │
 │   └─────────────────────────────────────┘                  │
 │         │                                                   │
 │         ▼                                                   │
-│   Watermarked [B,1,T] → CodecSimulator (G.711/G.729)       │
+│   Watermarked [B,1,T] → Codec (G.711/G.729/RS)             │
 │         │                                                   │
 │         ▼                                                   │
 │   ┌─────────────────────────────────────┐                  │
-│   │  Decoder                             │                  │
-│   │  ├─ CausalConv1d                    │                  │
-│   │  └─ TemporalBitExtractor            │ ← 시간 정보 보존  │
+│   │  Causal Decoder                      │                  │
+│   │  ├─ CausalConv (Stride 2)           │                  │
+│   │  └─ TemporalBitExtractor            │ ← Bit Logits     │
 │   └─────────────────────────────────────┘                  │
 │         │                                                   │
 │         ▼                                                   │
-│   Bits [B,128]                                             │
+│   Reed-Solomon RS(16,12) Decoder → Corrected Bits [B,128]  │
 │                                                             │
 │   Loss = λ_bit·BCE + λ_audio·Mel + λ_stft·STFT + λ_adv·GAN │
 └─────────────────────────────────────────────────────────────┘
@@ -144,7 +144,8 @@ exported/onnx/
 |--------|------|------|
 | PESQ | ≥ 4.0 | 음질 보존 (MOS 스케일) |
 | BER (G.729) | < 5% | 코덱 압축 후 비트 오류율 |
-| 지연 | < 200ms | 실시간 처리 |
+| RS Correct | ✅ | Reed-Solomon RS(16,12) 정정 |
+| 지연 | < 200ms | Causal 모델 + Mini-batch 처리 |
 | 모델 크기 | < 10MB | ONNX INT8 양자화 |
 
 ## 모니터링
